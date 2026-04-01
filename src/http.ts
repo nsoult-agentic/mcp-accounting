@@ -14,7 +14,7 @@
  * SECURITY: Credentials read from /secrets/quickbooks.env (mounted from /srv/).
  * Credentials never appear in tool output. Generic error messages only.
  *
- * Usage: PORT=8905 SECRETS_DIR=/secrets bun run src/http.ts
+ * Usage: PORT=8906 SECRETS_DIR=/secrets bun run src/http.ts
  */
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -24,7 +24,7 @@ import { z } from "zod";
 
 // ── Configuration ──────────────────────────────────────────
 
-const PORT = Number(process.env["PORT"]) || 8905;
+const PORT = Number(process.env["PORT"]) || 8906;
 const SECRETS_DIR = process.env["SECRETS_DIR"] || "/secrets";
 
 // ── Credential Loading ─────────────────────────────────────

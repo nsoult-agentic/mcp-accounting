@@ -21,7 +21,7 @@ COPY src/ ./src/
 # Non-root user for defense-in-depth
 USER bun
 
-EXPOSE 8905
+EXPOSE 8906
 
 # Auto-link ghcr.io package to repo
 LABEL org.opencontainers.image.source=https://github.com/nsoult-agentic/mcp-accounting

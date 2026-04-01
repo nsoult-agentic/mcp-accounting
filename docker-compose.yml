@@ -14,7 +14,7 @@ services:
 
     # ── Network ──
     ports:
-      - "127.0.0.1:8905:8905"  # Loopback ONLY — no external access
+      - "127.0.0.1:8906:8906"  # Loopback ONLY — no external access
 
     # ── Security Hardening ──
     read_only: true
@@ -39,7 +39,7 @@ services:
 
     # ── Health Check ──
     healthcheck:
-      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8905/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8906/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -49,5 +49,5 @@ services:
     environment:
       - NODE_ENV=production
       - SECRETS_DIR=/secrets
-      - PORT=8905
+      - PORT=8906
       # NEVER put credentials here — read from /secrets/quickbooks.env
