@@ -69,7 +69,12 @@ function loadCredentials(): QBOCredentials | null {
   };
 }
 
-const qboCreds = loadCredentials();
+// Lazy-load QBO credentials only when a QBO tool is first called (Phase 2)
+let _qboCreds: QBOCredentials | null | undefined;
+function getQBOCredentials(): QBOCredentials | null {
+  if (_qboCreds === undefined) _qboCreds = loadCredentials();
+  return _qboCreds;
+}
 
 // ── Sanitize Output ────────────────────────────────────────
 
@@ -82,28 +87,34 @@ function sanitize(s: string): string {
 }
 
 // ── Tax Configuration (2026) ───────────────────────────────
-// Source: IRS Publication 15 (2026), Delaware Division of Revenue
-// These rates should be updated annually.
+// Source: IRS Rev. Proc. 2025-32, SSA COLA announcement Oct 2025
+// ANNUAL UPDATE: Every October, IRS publishes next year's inflation adjustments.
+// Update this config when Rev. Proc. is released. See Second Brain task #recurring.
 
 const TAX_CONFIG = {
   year: 2026,
 
-  // Federal Income Tax — simplified bracket withholding (single filer, monthly)
+  // Standard deduction (single filer) — subtracted before bracket calculation
+  // per IRS Publication 15 percentage method
+  standardDeduction: 16_100, // $16,100 annual / $1,341.67 monthly
+
+  // Federal Income Tax brackets (single filer, ANNUAL taxable income after std deduction)
+  // Source: Rev. Proc. 2025-32
   federalBrackets: [
-    { min: 0, max: 958, rate: 0.10 },
-    { min: 958, max: 3_817, rate: 0.12 },
-    { min: 3_817, max: 8_150, rate: 0.22 },
-    { min: 8_150, max: 16_075, rate: 0.24 },
-    { min: 16_075, max: 20_317, rate: 0.32 },
-    { min: 20_317, max: 51_000, rate: 0.35 },
-    { min: 51_000, max: Infinity, rate: 0.37 },
+    { min: 0, max: 12_400, rate: 0.10 },
+    { min: 12_400, max: 50_400, rate: 0.12 },
+    { min: 50_400, max: 105_700, rate: 0.22 },
+    { min: 105_700, max: 201_775, rate: 0.24 },
+    { min: 201_775, max: 256_225, rate: 0.32 },
+    { min: 256_225, max: 640_600, rate: 0.35 },
+    { min: 640_600, max: Infinity, rate: 0.37 },
   ],
 
   // FICA
   socialSecurityRate: 0.062,
-  socialSecurityWageCap: 168_600,
+  socialSecurityWageCap: 184_500, // SSA Oct 2025 announcement
   medicareRate: 0.0145,
-  medicareAdditionalRate: 0.009, // Above $200K annual
+  medicareAdditionalRate: 0.009, // Above $200K annual (employee-only, no employer match)
   medicareAdditionalThreshold: 200_000,
 
   // Delaware — no state income tax withholding for single employee C-Corp
@@ -156,24 +167,29 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
   const ytdGross = monthlySalary * month;
   const priorYtdGross = monthlySalary * (month - 1);
 
-  // Federal income tax (simplified monthly withholding from brackets)
-  let federalWithholding = 0;
-  let remaining = monthlySalary;
+  // Federal income tax — IRS Pub 15 percentage method:
+  // Annualize gross, subtract standard deduction, apply brackets, de-annualize
+  const annualGross = monthlySalary * 12;
+  const annualTaxable = Math.max(0, annualGross - TAX_CONFIG.standardDeduction);
+  let annualFederalTax = 0;
+  let remaining = annualTaxable;
   for (const bracket of TAX_CONFIG.federalBrackets) {
     const taxableInBracket = Math.min(remaining, bracket.max - bracket.min);
     if (taxableInBracket <= 0) break;
-    federalWithholding += taxableInBracket * bracket.rate;
+    annualFederalTax += taxableInBracket * bracket.rate;
     remaining -= taxableInBracket;
   }
+  const federalWithholding = annualFederalTax / 12;
 
   // Social Security — capped at wage base
+  // Use priorYtdGross < cap (not ytdGross <= cap) to correctly handle the boundary month
   const ssThisMonth =
-    ytdGross <= TAX_CONFIG.socialSecurityWageCap
+    priorYtdGross < TAX_CONFIG.socialSecurityWageCap
       ? Math.min(monthlySalary, TAX_CONFIG.socialSecurityWageCap - priorYtdGross) *
         TAX_CONFIG.socialSecurityRate
       : 0;
 
-  // Medicare — no cap, additional rate above threshold
+  // Medicare — no cap, additional rate above threshold (employee-only)
   let medicare = monthlySalary * TAX_CONFIG.medicareRate;
   if (ytdGross > TAX_CONFIG.medicareAdditionalThreshold) {
     const additionalBase = Math.min(
@@ -191,9 +207,9 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
   const totalDeductions = federalWithholding + ssThisMonth + medicare + stateWithholding;
   const netPay = monthlySalary - totalDeductions;
 
-  // Employer-side
+  // Employer-side (same SS boundary fix)
   const employerSS =
-    ytdGross <= TAX_CONFIG.socialSecurityWageCap
+    priorYtdGross < TAX_CONFIG.socialSecurityWageCap
       ? Math.min(monthlySalary, TAX_CONFIG.socialSecurityWageCap - priorYtdGross) *
         TAX_CONFIG.employerSocialSecurityRate
       : 0;
@@ -224,6 +240,9 @@ async function payrollCalculate(params: {
   month: number;
   year: number;
 }): Promise<string> {
+  if (params.year !== TAX_CONFIG.year) {
+    return `Error: Only ${TAX_CONFIG.year} tax rates are loaded. Requested year: ${params.year}. Update TAX_CONFIG for other years.`;
+  }
   const result = calculatePayroll(params.monthlySalary, params.month);
 
   return `## Payroll Calculation — ${params.year} Month ${params.month}
@@ -271,6 +290,13 @@ const COMPLIANCE_CALENDAR = [
 
   // Delaware
   { name: "Delaware Franchise Tax", deadline: "03-01", description: "Annual report + franchise tax" },
+  { name: "Delaware Registered Agent", deadline: "06-01", description: "Annual registered agent renewal (check exact date)" },
+
+  // FinCEN
+  { name: "FinCEN BOI Report", deadline: "01-01", description: "Beneficial Ownership Information annual update (if applicable)" },
+
+  // Contractor reporting
+  { name: "Form 1099-NEC", deadline: "01-31", description: "Contractor payments >$600 (if any contractors paid)" },
 
   // Spain
   { name: "Modelo 720", deadline: "03-31", description: "Foreign asset declaration (Spain)" },
@@ -329,8 +355,9 @@ async function complianceCheck(): Promise<string> {
 // ── Tool: accounting-api-usage ─────────────────────────────
 
 async function apiUsage(): Promise<string> {
-  const qboStatus = qboCreds?.clientId ? "Configured (OAuth2 pending)" : "Not configured";
-  const toolCount = 4;
+  const creds = getQBOCredentials();
+  const qboStatus = creds?.clientId ? "Configured (OAuth2 pending)" : "Not configured";
+  const toolCount = 3;
 
   return `## mcp-accounting Status
 
@@ -361,7 +388,7 @@ function createServer(): McpServer {
     "Calculate monthly payroll withholdings for SOULT IO LTD. Returns federal tax, FICA, net pay, and employer costs.",
     PayrollCalculateInput,
     async (params) => ({
-      content: [{ type: "text" as const, text: await payrollCalculate(params) }],
+      content: [{ type: "text" as const, text: sanitize(await payrollCalculate(params)) }],
     }),
   );
 
@@ -370,7 +397,7 @@ function createServer(): McpServer {
     "Check upcoming tax and compliance deadlines for SOULT IO LTD (US federal, Delaware, Spain).",
     ComplianceCheckInput,
     async () => ({
-      content: [{ type: "text" as const, text: await complianceCheck() }],
+      content: [{ type: "text" as const, text: sanitize(await complianceCheck()) }],
     }),
   );
 
@@ -379,7 +406,7 @@ function createServer(): McpServer {
     "Show mcp-accounting server status, available tools, and QuickBooks Online connection status.",
     {},
     async () => ({
-      content: [{ type: "text" as const, text: await apiUsage() }],
+      content: [{ type: "text" as const, text: sanitize(await apiUsage()) }],
     }),
   );
 
@@ -434,7 +461,7 @@ const httpServer = Bun.serve({
 });
 
 console.log(`mcp-accounting listening on http://0.0.0.0:${PORT}/mcp`);
-console.log(`Tools: 3 (Phase 1) | QBO: ${qboCreds?.clientId ? "credentials loaded" : "not configured"}`);
+console.log("Tools: 3 (Phase 1) | QBO: deferred to Phase 2");
 
 process.on("SIGTERM", () => {
   httpServer.stop();
