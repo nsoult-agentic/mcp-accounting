@@ -47,7 +47,12 @@ services:
 
     # ── Environment ──
     environment:
+      - TZ=Europe/Madrid
       - NODE_ENV=production
       - SECRETS_DIR=/secrets
       - PORT=8906
+      - NEXTCLOUD_MCP_URL=http://host.docker.internal:8902/mcp
+      - SECOND_BRAIN_MCP_URL=http://host.docker.internal:8904/mcp
       # NEVER put credentials here — read from /secrets/quickbooks.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

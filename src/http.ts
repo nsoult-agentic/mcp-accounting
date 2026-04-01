@@ -2,14 +2,16 @@
  * MCP server for SOULT IO LTD accounting — multi-agent accounting tools.
  * Deployed via GitHub Actions → ghcr.io → Portainer CE GitOps polling.
  *
- * Tools:
+ * Tools (Phase 1):
  *   accounting-payroll-calculate   — Calculate monthly payroll withholdings
  *   accounting-compliance-check    — Check upcoming compliance deadlines
- *   accounting-invoice-status      — Read invoice data from QuickBooks Online
- *   accounting-bookkeeping-summary — P&L / expense summary from QuickBooks Online
+ *   accounting-api-usage           — Server status and tool list
  *
- * Phase 1: Payroll calculation + compliance checking (no QBO API needed)
- * Phase 2: QBO OAuth2 integration for invoice + bookkeeping tools
+ * Tools (Phase 2A — PDF + Time Tracking):
+ *   accounting-invoice-generate    — Generate invoice PDF, upload to NextCloud
+ *   accounting-payroll-paystub     — Generate pay stub PDF, upload to NextCloud
+ *   accounting-time-off-log        — Record a day off (sick/vacation/holiday)
+ *   accounting-time-off-list       — List time off for a month
  *
  * SECURITY: Credentials read from /secrets/quickbooks.env (mounted from /srv/).
  * Credentials never appear in tool output. Generic error messages only.
@@ -22,10 +24,46 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 
+import { createRenderer } from "./pdf/index.js";
+import type { InvoiceData, PaystubData } from "./pdf/types.js";
+import {
+  calculateWorkCalendar,
+  formatInvoiceDescription,
+  monthName,
+  type DayOff,
+} from "./calendar.js";
+import {
+  nextcloudUpload,
+  nextcloudDownload,
+  nextcloudList,
+  brainStore,
+  brainSearch,
+} from "./mcp-client.js";
+
 // ── Configuration ──────────────────────────────────────────
 
 const PORT = Number(process.env["PORT"]) || 8906;
 const SECRETS_DIR = process.env["SECRETS_DIR"] || "/secrets";
+
+// Company info — used in invoices and pay stubs
+const COMPANY: {
+  name: string;
+  address: string[];
+  email: string;
+  phone: string;
+  website: string;
+} = {
+  name: "Soult IO LTD",
+  address: ["8 The Grn Ste B", "Dover, DE 19901"],
+  email: "neil@soult.io",
+  phone: "+1 (310) 571-5236",
+  website: "www.soult.io",
+};
+
+const HOURLY_RATE = 100;
+const HOURS_PER_DAY = 8;
+const INVOICE_TERMS = "Net 15";
+const LOGO_PATH = "/Shared/Corporate/logo-black.png";
 
 // ── Credential Loading ─────────────────────────────────────
 
@@ -57,7 +95,7 @@ function loadCredentials(): QBOCredentials | null {
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eq = trimmed.indexOf("=");
     if (eq === -1) continue;
-    env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+    env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1).replace(/^["']|["']$/g, "");
   }
 
   return {
@@ -69,7 +107,7 @@ function loadCredentials(): QBOCredentials | null {
   };
 }
 
-// Lazy-load QBO credentials only when a QBO tool is first called (Phase 2)
+// Lazy-load QBO credentials only when a QBO tool is first called (Phase 2B)
 let _qboCreds: QBOCredentials | null | undefined;
 function getQBOCredentials(): QBOCredentials | null {
   if (_qboCreds === undefined) _qboCreds = loadCredentials();
@@ -79,27 +117,19 @@ function getQBOCredentials(): QBOCredentials | null {
 // ── Sanitize Output ────────────────────────────────────────
 
 function sanitize(s: string): string {
-  // Strip anything that looks like a credential or token
   return s
     .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
     .replace(/Basic\s+\S+/gi, "Basic [REDACTED]")
-    .replace(/[A-Za-z0-9+/=]{40,}/g, "[REDACTED]");
+    .replace(/\b(sk-|pk_|rk_|whsec_|xox[bpas]-)[A-Za-z0-9_-]{20,}/g, "[REDACTED]")
+    .replace(/http:\/\/host\.docker\.internal[^\s]*/g, "[internal]");
 }
 
 // ── Tax Configuration (2026) ───────────────────────────────
 // Source: IRS Rev. Proc. 2025-32, SSA COLA announcement Oct 2025
-// ANNUAL UPDATE: Every October, IRS publishes next year's inflation adjustments.
-// Update this config when Rev. Proc. is released. See Second Brain task #recurring.
 
 const TAX_CONFIG = {
   year: 2026,
-
-  // Standard deduction (single filer) — subtracted before bracket calculation
-  // per IRS Publication 15 percentage method
-  standardDeduction: 16_100, // $16,100 annual / $1,341.67 monthly
-
-  // Federal Income Tax brackets (single filer, ANNUAL taxable income after std deduction)
-  // Source: Rev. Proc. 2025-32
+  standardDeduction: 16_100,
   federalBrackets: [
     { min: 0, max: 12_400, rate: 0.10 },
     { min: 12_400, max: 50_400, rate: 0.12 },
@@ -109,44 +139,19 @@ const TAX_CONFIG = {
     { min: 256_225, max: 640_600, rate: 0.35 },
     { min: 640_600, max: Infinity, rate: 0.37 },
   ],
-
-  // FICA
   socialSecurityRate: 0.062,
-  socialSecurityWageCap: 184_500, // SSA Oct 2025 announcement
+  socialSecurityWageCap: 184_500,
   medicareRate: 0.0145,
-  medicareAdditionalRate: 0.009, // Above $200K annual (employee-only, no employer match)
+  medicareAdditionalRate: 0.009,
   medicareAdditionalThreshold: 200_000,
-
-  // Delaware — no state income tax withholding for single employee C-Corp
-  // (SOULT IO LTD is a Delaware C-Corp; Neil lives in Barcelona, not Delaware)
   stateWithholding: 0,
-
-  // Employer-side taxes
   employerSocialSecurityRate: 0.062,
   employerMedicareRate: 0.0145,
   futaRate: 0.006,
   futaWageCap: 7_000,
 };
 
-// ── Tool: accounting-payroll-calculate ──────────────────────
-
-const PayrollCalculateInput = {
-  monthlySalary: z
-    .number()
-    .positive()
-    .describe("Monthly gross salary in USD"),
-  month: z
-    .number()
-    .int()
-    .min(1)
-    .max(12)
-    .describe("Month number (1-12)"),
-  year: z
-    .number()
-    .int()
-    .default(2026)
-    .describe("Tax year (default: 2026)"),
-};
+// ── Payroll Calculation ────────────────────────────────────
 
 interface PayrollResult {
   grossPay: number;
@@ -167,8 +172,6 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
   const ytdGross = monthlySalary * month;
   const priorYtdGross = monthlySalary * (month - 1);
 
-  // Federal income tax — IRS Pub 15 percentage method:
-  // Annualize gross, subtract standard deduction, apply brackets, de-annualize
   const annualGross = monthlySalary * 12;
   const annualTaxable = Math.max(0, annualGross - TAX_CONFIG.standardDeduction);
   let annualFederalTax = 0;
@@ -181,15 +184,12 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
   }
   const federalWithholding = annualFederalTax / 12;
 
-  // Social Security — capped at wage base
-  // Use priorYtdGross < cap (not ytdGross <= cap) to correctly handle the boundary month
   const ssThisMonth =
     priorYtdGross < TAX_CONFIG.socialSecurityWageCap
       ? Math.min(monthlySalary, TAX_CONFIG.socialSecurityWageCap - priorYtdGross) *
         TAX_CONFIG.socialSecurityRate
       : 0;
 
-  // Medicare — no cap, additional rate above threshold (employee-only)
   let medicare = monthlySalary * TAX_CONFIG.medicareRate;
   if (ytdGross > TAX_CONFIG.medicareAdditionalThreshold) {
     const additionalBase = Math.min(
@@ -201,13 +201,10 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
     }
   }
 
-  // State — none for Delaware C-Corp with employee abroad
   const stateWithholding = TAX_CONFIG.stateWithholding;
-
   const totalDeductions = federalWithholding + ssThisMonth + medicare + stateWithholding;
   const netPay = monthlySalary - totalDeductions;
 
-  // Employer-side (same SS boundary fix)
   const employerSS =
     priorYtdGross < TAX_CONFIG.socialSecurityWageCap
       ? Math.min(monthlySalary, TAX_CONFIG.socialSecurityWageCap - priorYtdGross) *
@@ -235,6 +232,8 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
   };
 }
 
+// ── Tool Handlers ──────────────────────────────────────────
+
 async function payrollCalculate(params: {
   monthlySalary: number;
   month: number;
@@ -243,7 +242,7 @@ async function payrollCalculate(params: {
   if (params.year !== TAX_CONFIG.year) {
     return `Error: Only ${TAX_CONFIG.year} tax rates are loaded. Requested year: ${params.year}. Update TAX_CONFIG for other years.`;
   }
-  const result = calculatePayroll(params.monthlySalary, params.month);
+  const r = calculatePayroll(params.monthlySalary, params.month);
 
   return `## Payroll Calculation — ${params.year} Month ${params.month}
 
@@ -251,31 +250,28 @@ async function payrollCalculate(params: {
 
 | Item | Amount |
 |------|--------|
-| Gross Pay | $${result.grossPay.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| Federal Withholding | -$${result.federalWithholding.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| Social Security (6.2%) | -$${result.socialSecurity.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| Medicare (1.45%) | -$${result.medicare.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| State Withholding | -$${result.stateWithholding.toFixed(2)} |
-| **Total Deductions** | **-$${result.totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |
-| **Net Pay** | **$${result.netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |
+| Gross Pay | $${r.grossPay.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| Federal Withholding | -$${r.federalWithholding.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| Social Security (6.2%) | -$${r.socialSecurity.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| Medicare (1.45%) | -$${r.medicare.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| State Withholding | -$${r.stateWithholding.toFixed(2)} |
+| **Total Deductions** | **-$${r.totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |
+| **Net Pay** | **$${r.netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |
 
 ### Employer Taxes
 | Item | Amount |
 |------|--------|
-| Employer SS (6.2%) | $${result.employerSocialSecurity.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| Employer Medicare (1.45%) | $${result.employerMedicare.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| FUTA (0.6%) | $${result.employerFUTA.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
-| **Total Employer Cost** | **$${result.totalEmployerCost.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |
+| Employer SS (6.2%) | $${r.employerSocialSecurity.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| Employer Medicare (1.45%) | $${r.employerMedicare.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| FUTA (0.6%) | $${r.employerFUTA.toLocaleString("en-US", { minimumFractionDigits: 2 })} |
+| **Total Employer Cost** | **$${r.totalEmployerCost.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |
 
-**YTD Gross:** $${result.ytdGross.toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
+**YTD Gross:** $${r.ytdGross.toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
 }
 
-// ── Tool: accounting-compliance-check ──────────────────────
-
-const ComplianceCheckInput = {};
+// ── Compliance Calendar ────────────────────────────────────
 
 const COMPLIANCE_CALENDAR = [
-  // US Federal
   { name: "Form 941 (Q1)", deadline: "04-30", description: "Quarterly federal tax return" },
   { name: "Form 941 (Q2)", deadline: "07-31", description: "Quarterly federal tax return" },
   { name: "Form 941 (Q3)", deadline: "10-31", description: "Quarterly federal tax return" },
@@ -287,18 +283,10 @@ const COMPLIANCE_CALENDAR = [
   { name: "Estimated Tax (Q2)", deadline: "06-15", description: "Corporate estimated tax payment" },
   { name: "Estimated Tax (Q3)", deadline: "09-15", description: "Corporate estimated tax payment" },
   { name: "Estimated Tax (Q4)", deadline: "12-15", description: "Corporate estimated tax payment" },
-
-  // Delaware
   { name: "Delaware Franchise Tax", deadline: "03-01", description: "Annual report + franchise tax" },
   { name: "Delaware Registered Agent", deadline: "06-01", description: "Annual registered agent renewal (check exact date)" },
-
-  // FinCEN
   { name: "FinCEN BOI Report", deadline: "01-01", description: "Beneficial Ownership Information annual update (if applicable)" },
-
-  // Contractor reporting
   { name: "Form 1099-NEC", deadline: "01-31", description: "Contractor payments >$600 (if any contractors paid)" },
-
-  // Spain
   { name: "Modelo 720", deadline: "03-31", description: "Foreign asset declaration (Spain)" },
   { name: "Spain IRPF Declaration", deadline: "06-30", description: "Spanish personal income tax" },
 ];
@@ -313,7 +301,6 @@ async function complianceCheck(): Promise<string> {
 
   for (const item of COMPLIANCE_CALENDAR) {
     const [mm, dd] = item.deadline.split("-").map(Number);
-    // Check both current year and next year for wrapping deadlines
     for (const y of [year, year + 1]) {
       const deadlineDate = new Date(y, mm - 1, dd);
       const diffMs = deadlineDate.getTime() - now.getTime();
@@ -352,27 +339,372 @@ async function complianceCheck(): Promise<string> {
   return lines.join("\n");
 }
 
-// ── Tool: accounting-api-usage ─────────────────────────────
+// ── Time Off ───────────────────────────────────────────────
+
+const TIMEOFF_PREFIX = "TIMEOFF";
+
+async function timeOffLog(params: {
+  date: string;
+  type: string;
+  note: string;
+}): Promise<string> {
+  // RT-008: Validate the date is a weekday
+  const [y, m, d] = params.date.split("-").map(Number);
+  const dateObj = new Date(y, m - 1, d);
+  const dow = dateObj.getDay();
+  if (dow === 0 || dow === 6) {
+    return `Error: ${params.date} is a ${dow === 0 ? "Sunday" : "Saturday"}. Time off can only be logged for weekdays.`;
+  }
+
+  // RT-006: Sanitize note — strip newlines, limit length
+  const cleanNote = (params.note || "").replace(/[\n\r]/g, " ").slice(0, 200).trim();
+
+  const title = `${TIMEOFF_PREFIX}:${params.date}:${params.type}`;
+  const text = `Time off record. Date: ${params.date}. Type: ${params.type}. Note: ${cleanNote || "none"}.`;
+
+  try {
+    await brainStore(title, text, "task", "active");
+    return `## Time Off Logged\n\n- **Date:** ${params.date}\n- **Type:** ${params.type}\n- **Note:** ${cleanNote || "—"}\n\nStored in Second Brain.`;
+  } catch (err) {
+    return `Error storing time off: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
+
+async function timeOffList(params: {
+  month: number;
+  year: number;
+}): Promise<{ markdown: string; daysOff: DayOff[]; brainUnavailable: boolean }> {
+  const monthStr = String(params.month).padStart(2, "0");
+  const query = `${TIMEOFF_PREFIX} ${params.year}-${monthStr}`;
+
+  let daysOff: DayOff[] = [];
+  let brainUnavailable = false;
+  try {
+    const results = await brainSearch(query, {
+      mode: "fulltext",
+      category: "task",
+      status: "active",
+      limit: 31,
+    });
+
+    // Parse results — each line starting with # is an entry
+    // Format from brain-search: "[N] #ID — TIMEOFF:YYYY-MM-DD:type"
+    const lines = results.split("\n");
+    for (const line of lines) {
+      const match = line.match(/TIMEOFF:(\d{4}-\d{2}-\d{2}):(\w+)/);
+      if (match) {
+        const [, date, type] = match;
+        // Only include entries matching the requested month
+        if (date.startsWith(`${params.year}-${monthStr}`)) {
+          // Extract note from the content line if available
+          const noteMatch = line.match(/Note:\s*([^.]+)/);
+          daysOff.push({ date, type, note: noteMatch?.[1]?.trim() });
+        }
+      }
+    }
+  } catch {
+    brainUnavailable = true;
+  }
+
+  // Deduplicate by date
+  const seen = new Set<string>();
+  daysOff = daysOff.filter((d) => {
+    if (seen.has(d.date)) return false;
+    seen.add(d.date);
+    return true;
+  });
+
+  daysOff.sort((a, b) => a.date.localeCompare(b.date));
+
+  const mn = monthName(params.month);
+  let markdown = `## Time Off — ${mn} ${params.year}\n\n`;
+  if (brainUnavailable) {
+    markdown += "⚠️ **Warning: Second Brain is unavailable.** Time-off data could not be retrieved. Invoice generation will assume zero days off — verify before sending.\n\n";
+  }
+  if (daysOff.length === 0 && !brainUnavailable) {
+    markdown += "No time off recorded for this month.";
+  } else if (daysOff.length === 0) {
+    markdown += "No time off data available (see warning above).";
+  } else {
+    markdown += "| Date | Type | Note |\n|------|------|------|\n";
+    for (const d of daysOff) {
+      markdown += `| ${d.date} | ${d.type} | ${d.note || "—"} |\n`;
+    }
+    markdown += `\n**Total days off:** ${daysOff.length}`;
+  }
+
+  return { markdown, daysOff, brainUnavailable };
+}
+
+// ── Invoice Generation ─────────────────────────────────────
+
+async function fetchLogo(): Promise<Buffer | undefined> {
+  try {
+    const result = await nextcloudDownload(LOGO_PATH);
+    // The download tool returns binary as base64 in a resource content block
+    for (const c of result.content) {
+      if (c.data) {
+        return Buffer.from(c.data, "base64");
+      }
+      if (c.type === "resource" && (c as any).resource?.blob) {
+        return Buffer.from((c as any).resource.blob, "base64");
+      }
+    }
+    // If we got text back, it might be a file path reference — logo not available as inline
+    return undefined;
+  } catch {
+    console.error("Could not fetch logo from NextCloud — generating invoice without logo");
+    return undefined;
+  }
+}
+
+function addDays(dateStr: string, days: number): string {
+  // Parse MM/DD/YYYY
+  const [mm, dd, yyyy] = dateStr.split("/").map(Number);
+  const d = new Date(yyyy, mm - 1, dd + days);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
+}
+
+async function detectNextInvoiceNumber(year: number): Promise<number> {
+  try {
+    const listing = await nextcloudList(`/Shared/Accounting/Invoices/${year}`);
+    // Parse invoice numbers from filenames: "Invoice NNNN - ..."
+    const numbers: number[] = [];
+    const regex = /Invoice\s+(\d+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(listing)) !== null) {
+      numbers.push(parseInt(m[1], 10));
+    }
+    if (numbers.length > 0) {
+      return Math.max(...numbers) + 1;
+    }
+  } catch {
+    // NextCloud unavailable or directory doesn't exist
+  }
+  // Check previous year too
+  try {
+    const listing = await nextcloudList(`/Shared/Accounting/Invoices/${year - 1}`);
+    const numbers: number[] = [];
+    const regex = /Invoice\s+(\d+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(listing)) !== null) {
+      numbers.push(parseInt(m[1], 10));
+    }
+    if (numbers.length > 0) {
+      return Math.max(...numbers) + 1;
+    }
+  } catch {
+    // fallback
+  }
+  return 1001; // safe default
+}
+
+async function invoiceGenerate(params: {
+  month: number;
+  year: number;
+  invoiceNumber?: number;
+  client: string;
+  dryRun: boolean;
+}): Promise<string> {
+  // 1. Get time off for the month
+  const { daysOff, brainUnavailable } = await timeOffList({ month: params.month, year: params.year });
+
+  // 2. Calculate work calendar
+  const calendar = calculateWorkCalendar(params.year, params.month, daysOff, HOURS_PER_DAY);
+
+  if (calendar.workDays === 0) {
+    return `Error: No work days calculated for ${monthName(params.month)} ${params.year}. Check time-off records.`;
+  }
+
+  // 3. Determine invoice number
+  const invoiceNumber = params.invoiceNumber ?? await detectNextInvoiceNumber(params.year);
+
+  // 4. Build dates
+  const mn = monthName(params.month);
+  const invoiceDate = `${String(params.month + 1 > 12 ? 1 : params.month + 1).padStart(2, "0")}/01/${params.month === 12 ? params.year + 1 : params.year}`;
+  const dueDate = addDays(invoiceDate, 15);
+
+  // 5. Build description with week ranges
+  const description = formatInvoiceDescription(mn, calendar.weekRanges);
+
+  // 6. Fetch logo
+  const logo = await fetchLogo();
+
+  // 7. Build invoice data
+  const invoiceData: InvoiceData = {
+    invoiceNumber,
+    invoiceDate,
+    dueDate,
+    terms: INVOICE_TERMS,
+    from: COMPANY,
+    billTo: params.client,
+    shipTo: params.client,
+    lineItems: [
+      {
+        service: "Services",
+        description,
+        quantity: calendar.totalHours,
+        rate: HOURLY_RATE,
+      },
+    ],
+    logo,
+  };
+
+  // 8. Render PDF
+  const renderer = createRenderer();
+  const pdfBuffer = await renderer.renderInvoice(invoiceData);
+
+  // 9. Summary
+  const total = calendar.totalHours * HOURLY_RATE;
+  const summary = [
+    `## Invoice Generated`,
+    ``,
+    `| Field | Value |`,
+    `|-------|-------|`,
+    `| Invoice # | ${invoiceNumber} |`,
+    `| Client | ${params.client} |`,
+    `| Period | ${mn} ${params.year} |`,
+    `| Work Days | ${calendar.workDays} / ${calendar.businessDaysInMonth} business days |`,
+    `| Days Off | ${daysOff.length} |`,
+    `| Hours | ${calendar.totalHours} |`,
+    `| Rate | $${HOURLY_RATE}/hr |`,
+    `| **Total** | **$${total.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
+    `| Invoice Date | ${invoiceDate} |`,
+    `| Due Date | ${dueDate} |`,
+    ``,
+    `### Week Ranges`,
+    ...calendar.weekRanges.map((r) => `- ${r}`),
+  ];
+
+  if (brainUnavailable) {
+    summary.push(``, `⚠️ **Warning:** Second Brain was unavailable — time-off data could not be verified. This invoice assumes zero days off. **Do not send without verifying.**`);
+  }
+
+  if (daysOff.length > 0) {
+    summary.push(``, `### Days Off`);
+    for (const d of daysOff) {
+      summary.push(`- ${d.date} (${d.type})${d.note ? ` — ${d.note}` : ""}`);
+    }
+  }
+
+  // 10. Upload to NextCloud (unless dry run)
+  if (!params.dryRun) {
+    const fileName = `Invoice ${invoiceNumber} - SOULT IO LTD ${invoiceDate.split("/")[2]}-${invoiceDate.split("/")[0]}-${invoiceDate.split("/")[1]}.pdf`;
+    const uploadPath = `/Shared/Accounting/Invoices/${params.year}/${fileName}`;
+    try {
+      await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
+      summary.push(``, `**Uploaded to:** ${uploadPath}`);
+    } catch (err) {
+      summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
+      summary.push(`PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but could not be uploaded.`);
+    }
+  } else {
+    summary.push(``, `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`);
+  }
+
+  return summary.join("\n");
+}
+
+// ── Pay Stub Generation ────────────────────────────────────
+
+async function paystubGenerate(params: {
+  month: number;
+  year: number;
+  monthlySalary: number;
+  dryRun: boolean;
+}): Promise<string> {
+  if (params.year !== TAX_CONFIG.year) {
+    return `Error: Only ${TAX_CONFIG.year} tax rates are loaded.`;
+  }
+
+  // 1. Calculate payroll
+  const payroll = calculatePayroll(params.monthlySalary, params.month);
+  const mn = monthName(params.month);
+
+  // 2. Build paystub data
+  const paystubData: PaystubData = {
+    employee: "Neil Soult",
+    entity: COMPANY.name,
+    period: `${mn} ${params.year}`,
+    payDate: `${String(params.month).padStart(2, "0")}/15/${params.year}`,
+    gross: payroll.grossPay,
+    deductions: [
+      { label: "Federal Income Tax", amount: payroll.federalWithholding },
+      { label: "Social Security (6.2%)", amount: payroll.socialSecurity },
+      { label: "Medicare (1.45%)", amount: payroll.medicare },
+    ],
+    netPay: payroll.netPay,
+    ytdGross: payroll.ytdGross,
+    employerCosts: [
+      { label: "Employer Social Security (6.2%)", amount: payroll.employerSocialSecurity },
+      { label: "Employer Medicare (1.45%)", amount: payroll.employerMedicare },
+      { label: "FUTA (0.6%)", amount: payroll.employerFUTA },
+    ],
+  };
+
+  // Filter out zero-value deductions
+  paystubData.deductions = paystubData.deductions.filter((d) => d.amount > 0);
+  paystubData.employerCosts = paystubData.employerCosts.filter((d) => d.amount > 0);
+
+  // 3. Render PDF
+  const renderer = createRenderer();
+  const pdfBuffer = await renderer.renderPaystub(paystubData);
+
+  // 4. Summary
+  const summary = [
+    `## Pay Stub Generated — ${mn} ${params.year}`,
+    ``,
+    `| Field | Value |`,
+    `|-------|-------|`,
+    `| Employee | Neil Soult |`,
+    `| Gross Pay | $${payroll.grossPay.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    `| Total Deductions | -$${payroll.totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    `| **Net Pay** | **$${payroll.netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
+    `| YTD Gross | $${payroll.ytdGross.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+  ];
+
+  // 5. Upload
+  if (!params.dryRun) {
+    const monthPadded = String(params.month).padStart(2, "0");
+    const fileName = `paystub-${params.year}-${monthPadded}.pdf`;
+    const uploadPath = `/Shared/Payroll/${params.year}/${fileName}`;
+    try {
+      await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
+      summary.push(``, `**Uploaded to:** ${uploadPath}`);
+    } catch (err) {
+      summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
+    }
+  } else {
+    summary.push(``, `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`);
+  }
+
+  return summary.join("\n");
+}
+
+// ── API Usage ──────────────────────────────────────────────
 
 async function apiUsage(): Promise<string> {
   const creds = getQBOCredentials();
   const qboStatus = creds?.clientId ? "Configured (OAuth2 pending)" : "Not configured";
-  const toolCount = 3;
 
   return `## mcp-accounting Status
 
 | Item | Status |
 |------|--------|
 | Server | Running on port ${PORT} |
-| Tools | ${toolCount} active |
+| Tools | 7 active |
 | QBO API | ${qboStatus} |
 | Tax Config | ${TAX_CONFIG.year} rates loaded |
+| PDF Renderer | pdfmake |
 
 ### Available Tools
 - **accounting-payroll-calculate** — Monthly payroll withholding calculation
+- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
 - **accounting-compliance-check** — Upcoming tax/compliance deadlines
-- **accounting-invoice-status** — Invoice data from QBO *(Phase 2)*
-- **accounting-bookkeeping-summary** — P&L from QBO *(Phase 2)*`;
+- **accounting-invoice-generate** — Generate invoice PDF + upload to NextCloud
+- **accounting-time-off-log** — Record sick day, vacation, or holiday
+- **accounting-time-off-list** — List time off for a month
+- **accounting-api-usage** — This status page`;
 }
 
 // ── MCP Server ─────────────────────────────────────────────
@@ -380,13 +712,19 @@ async function apiUsage(): Promise<string> {
 function createServer(): McpServer {
   const server = new McpServer({
     name: "mcp-accounting",
-    version: "0.1.0",
+    version: "0.2.0",
   });
+
+  // ── Phase 1 Tools ──
 
   server.tool(
     "accounting-payroll-calculate",
     "Calculate monthly payroll withholdings for SOULT IO LTD. Returns federal tax, FICA, net pay, and employer costs.",
-    PayrollCalculateInput,
+    {
+      monthlySalary: z.number().positive().describe("Monthly gross salary in USD"),
+      month: z.number().int().min(1).max(12).describe("Month number (1-12)"),
+      year: z.number().int().default(2026).describe("Tax year (default: 2026)"),
+    },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await payrollCalculate(params)) }],
     }),
@@ -395,7 +733,7 @@ function createServer(): McpServer {
   server.tool(
     "accounting-compliance-check",
     "Check upcoming tax and compliance deadlines for SOULT IO LTD (US federal, Delaware, Spain).",
-    ComplianceCheckInput,
+    {},
     async () => ({
       content: [{ type: "text" as const, text: sanitize(await complianceCheck()) }],
     }),
@@ -403,10 +741,66 @@ function createServer(): McpServer {
 
   server.tool(
     "accounting-api-usage",
-    "Show mcp-accounting server status, available tools, and QuickBooks Online connection status.",
+    "Show mcp-accounting server status, available tools, and connection status.",
     {},
     async () => ({
       content: [{ type: "text" as const, text: sanitize(await apiUsage()) }],
+    }),
+  );
+
+  // ── Phase 2A Tools ──
+
+  server.tool(
+    "accounting-time-off-log",
+    "Record a day off (sick, vacation, holiday). Stores in Second Brain for invoice calculation.",
+    {
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date (YYYY-MM-DD)"),
+      type: z.enum(["sick", "vacation", "holiday", "other"]).describe("Type of time off"),
+      note: z.string().default("").describe("Optional note (e.g., 'Good Friday trip')"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize(await timeOffLog(params)) }],
+    }),
+  );
+
+  server.tool(
+    "accounting-time-off-list",
+    "List recorded time off for a given month. Used by invoice generator to calculate work days.",
+    {
+      month: z.number().int().min(1).max(12).describe("Month (1-12)"),
+      year: z.number().int().default(2026).describe("Year"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize((await timeOffList(params)).markdown) }],
+    }),
+  );
+
+  server.tool(
+    "accounting-invoice-generate",
+    "Generate a Crexi invoice PDF for a given month. Calculates work days from calendar minus time off, renders PDF, uploads to NextCloud.",
+    {
+      month: z.number().int().min(1).max(12).describe("Month to invoice (1-12)"),
+      year: z.number().int().default(2026).describe("Year"),
+      invoiceNumber: z.number().int().optional().describe("Invoice number (auto-detects from NextCloud if omitted)"),
+      client: z.string().default("Crexi").describe("Client name (default: Crexi)"),
+      dryRun: z.boolean().default(false).describe("If true, generate PDF but don't upload to NextCloud"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize(await invoiceGenerate(params)) }],
+    }),
+  );
+
+  server.tool(
+    "accounting-payroll-paystub",
+    "Generate a pay stub PDF for a given month. Uses payroll calculation, renders PDF, uploads to NextCloud.",
+    {
+      month: z.number().int().min(1).max(12).describe("Month (1-12)"),
+      year: z.number().int().default(2026).describe("Year"),
+      monthlySalary: z.number().positive().describe("Monthly gross salary in USD"),
+      dryRun: z.boolean().default(false).describe("If true, generate PDF but don't upload"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize(await paystubGenerate(params)) }],
     }),
   );
 
@@ -461,7 +855,7 @@ const httpServer = Bun.serve({
 });
 
 console.log(`mcp-accounting listening on http://0.0.0.0:${PORT}/mcp`);
-console.log("Tools: 3 (Phase 1) | QBO: deferred to Phase 2");
+console.log("Tools: 7 (Phase 1 + 2A) | PDF: pdfmake | QBO: deferred to Phase 2B");
 
 process.on("SIGTERM", () => {
   httpServer.stop();
