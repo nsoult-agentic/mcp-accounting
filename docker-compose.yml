@@ -13,8 +13,11 @@ services:
     restart: unless-stopped
 
     # ── Network ──
+    networks:
+      - default
+      - npm_network
     ports:
-      - "127.0.0.1:8906:8906"  # Loopback ONLY — no external access
+      - "127.0.0.1:8906:8906"  # Loopback for direct MCP calls
 
     # ── Security Hardening ──
     read_only: true
@@ -34,6 +37,8 @@ services:
     volumes:
       # Secrets — root-owned on host, read-only in container
       - /srv/mcp-accounting/secrets:/secrets:ro
+      # Dynamic OAuth tokens — writable, 0700 on host, UID 1000 (bun)
+      - /srv/mcp-accounting/tokens:/tokens:rw
     tmpfs:
       - /tmp:size=64m,noexec,nosuid
 
@@ -51,8 +56,13 @@ services:
       - NODE_ENV=production
       - SECRETS_DIR=/secrets
       - PORT=8906
+      - TOKENS_DIR=/tokens
       - NEXTCLOUD_MCP_URL=http://host.docker.internal:8902/mcp
       - SECOND_BRAIN_MCP_URL=http://host.docker.internal:8904/mcp
       # NEVER put credentials here — read from /secrets/quickbooks.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+networks:
+  npm_network:
+    external: true

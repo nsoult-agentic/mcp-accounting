@@ -39,6 +39,20 @@ import {
   brainStore,
   brainSearch,
 } from "./mcp-client.js";
+import {
+  generateAuthUrl,
+  validateState,
+  isAuthWindowOpen,
+  exchangeCode,
+  readTokens,
+  isAccessTokenExpired,
+  isRefreshTokenExpired,
+} from "./qbo-auth.js";
+import {
+  companyInfo as qboCompanyInfo,
+  profitAndLoss as qboProfitAndLoss,
+  listInvoices as qboListInvoices,
+} from "./qbo-client.js";
 
 // ── Configuration ──────────────────────────────────────────
 
@@ -70,6 +84,7 @@ const LOGO_PATH = "/Shared/Corporate/logo-black.png";
 interface QBOCredentials {
   clientId: string;
   clientSecret: string;
+  redirectUri?: string;
   realmId?: string;
   accessToken?: string;
   refreshToken?: string;
@@ -101,6 +116,7 @@ function loadCredentials(): QBOCredentials | null {
   return {
     clientId: env["QBO_CLIENT_ID"] || "",
     clientSecret: env["QBO_CLIENT_SECRET"] || "",
+    redirectUri: env["QBO_REDIRECT_URI"] || undefined,
     realmId: env["QBO_REALM_ID"] || undefined,
     accessToken: env["QBO_ACCESS_TOKEN"] || undefined,
     refreshToken: env["QBO_REFRESH_TOKEN"] || undefined,
@@ -121,6 +137,8 @@ function sanitize(s: string): string {
     .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
     .replace(/Basic\s+\S+/gi, "Basic [REDACTED]")
     .replace(/\b(sk-|pk_|rk_|whsec_|xox[bpas]-)[A-Za-z0-9_-]{20,}/g, "[REDACTED]")
+    .replace(/["']?access_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "access_token=[REDACTED]")
+    .replace(/["']?refresh_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "refresh_token=[REDACTED]")
     .replace(/http:\/\/host\.docker\.internal[^\s]*/g, "[internal]");
 }
 
@@ -684,27 +702,61 @@ async function paystubGenerate(params: {
 // ── API Usage ──────────────────────────────────────────────
 
 async function apiUsage(): Promise<string> {
-  const creds = getQBOCredentials();
-  const qboStatus = creds?.clientId ? "Configured (OAuth2 pending)" : "Not configured";
+  const qboStatus = getQBOStatus();
 
   return `## mcp-accounting Status
 
 | Item | Status |
 |------|--------|
 | Server | Running on port ${PORT} |
-| Tools | 7 active |
+| Tools | 11 active |
 | QBO API | ${qboStatus} |
 | Tax Config | ${TAX_CONFIG.year} rates loaded |
 | PDF Renderer | pdfmake |
 
 ### Available Tools
+**Phase 1 — Payroll & Compliance:**
 - **accounting-payroll-calculate** — Monthly payroll withholding calculation
-- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
 - **accounting-compliance-check** — Upcoming tax/compliance deadlines
+- **accounting-api-usage** — This status page
+
+**Phase 2A — PDF & Time Tracking:**
+- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
 - **accounting-invoice-generate** — Generate invoice PDF + upload to NextCloud
 - **accounting-time-off-log** — Record sick day, vacation, or holiday
 - **accounting-time-off-list** — List time off for a month
-- **accounting-api-usage** — This status page`;
+
+**Phase 2B — QuickBooks Online:**
+- **accounting-qbo-auth-url** — Generate OAuth2 authorization URL
+- **accounting-qbo-status** — Check QBO connection status
+- **accounting-invoice-status** — Read invoices from QBO
+- **accounting-bookkeeping-summary** — Profit & Loss report from QBO`;
+}
+
+// ── OAuth Callback HTML ───────────────────────────────────
+
+function callbackHtml(message: string, success: boolean): string {
+  const color = success ? "#22c55e" : "#ef4444";
+  const icon = success ? "&#10003;" : "&#10007;";
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>QBO Auth</title>
+<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}
+.card{text-align:center;padding:2rem;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.1);background:#fff;max-width:400px}
+.icon{font-size:3rem;color:${color}}</style></head>
+<body><div class="card"><div class="icon">${icon}</div><p>${message}</p></div></body></html>`;
+}
+
+// ── QBO Connection Status ─────────────────────────────────
+
+function getQBOStatus(): string {
+  const creds = getQBOCredentials();
+  if (!creds?.clientId) return "Not configured (missing credentials)";
+
+  const tokens = readTokens();
+  if (!tokens) return "Configured — not yet authorized";
+
+  if (isRefreshTokenExpired(tokens)) return "Refresh token expired — re-authorization required";
+  if (isAccessTokenExpired(tokens)) return "Access token expired — will auto-refresh on next call";
+  return "Connected";
 }
 
 // ── MCP Server ─────────────────────────────────────────────
@@ -804,6 +856,98 @@ function createServer(): McpServer {
     }),
   );
 
+  // ── Phase 2B Tools (QBO OAuth + API) ──
+
+  server.tool(
+    "accounting-qbo-auth-url",
+    "Generate a QuickBooks OAuth2 authorization URL. Open the returned URL in any browser to authorize. The callback window is active for 10 minutes.",
+    {},
+    async () => {
+      const creds = getQBOCredentials();
+      if (!creds?.clientId || !creds?.redirectUri) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: QBO_CLIENT_ID or QBO_REDIRECT_URI not configured in quickbooks.env",
+          }],
+        };
+      }
+      const { url, expiresIn } = generateAuthUrl(creds.clientId, creds.redirectUri);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `## QBO Authorization\n\nOpen this URL in your browser:\n\n${url}\n\nCallback window expires in ${expiresIn}.`,
+        }],
+      };
+    },
+  );
+
+  server.tool(
+    "accounting-qbo-status",
+    "Check QuickBooks Online connection status. Shows whether OAuth is configured, authorized, and token freshness.",
+    {},
+    async () => {
+      const status = getQBOStatus();
+      const tokens = readTokens();
+      let details = `## QBO Connection Status\n\n**Status:** ${status}\n`;
+
+      if (tokens && !isRefreshTokenExpired(tokens)) {
+        const accessExpiry = new Date(tokens.expiresAt).toISOString();
+        const refreshExpiry = new Date(tokens.refreshExpiresAt).toISOString();
+        details += `\n| Field | Value |\n|-------|-------|\n`;
+        details += `| Realm ID | ${tokens.realmId} |\n`;
+        details += `| Access Token Expires | ${accessExpiry} |\n`;
+        details += `| Refresh Token Expires | ${refreshExpiry} |\n`;
+      }
+
+      return {
+        content: [{ type: "text" as const, text: sanitize(details) }],
+      };
+    },
+  );
+
+  server.tool(
+    "accounting-invoice-status",
+    "Read invoice data from QuickBooks Online for a date range.",
+    {
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Start date (YYYY-MM-DD)"),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("End date (YYYY-MM-DD)"),
+    },
+    async (params) => {
+      const creds = getQBOCredentials();
+      if (!creds?.clientId || !creds?.clientSecret) {
+        return { content: [{ type: "text" as const, text: "Error: QBO credentials not configured" }] };
+      }
+      try {
+        const data = await qboListInvoices({ clientId: creds.clientId, clientSecret: creds.clientSecret }, params.startDate, params.endDate);
+        return { content: [{ type: "text" as const, text: sanitize(JSON.stringify(data, null, 2)) }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: sanitize(`Error: ${err instanceof Error ? err.message : "unknown"}`) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "accounting-bookkeeping-summary",
+    "Get Profit & Loss report from QuickBooks Online for a date range.",
+    {
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Start date (YYYY-MM-DD)"),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("End date (YYYY-MM-DD)"),
+    },
+    async (params) => {
+      const creds = getQBOCredentials();
+      if (!creds?.clientId || !creds?.clientSecret) {
+        return { content: [{ type: "text" as const, text: "Error: QBO credentials not configured" }] };
+      }
+      try {
+        const data = await qboProfitAndLoss({ clientId: creds.clientId, clientSecret: creds.clientSecret }, params.startDate, params.endDate);
+        return { content: [{ type: "text" as const, text: sanitize(JSON.stringify(data, null, 2)) }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: sanitize(`Error: ${err instanceof Error ? err.message : "unknown"}`) }] };
+      }
+    },
+  );
+
   return server;
 }
 
@@ -838,7 +982,63 @@ const httpServer = Bun.serve({
       );
     }
 
+    // ── OAuth Callback (browser redirect from Intuit) ──
+    if (url.pathname === "/oauth/callback" && req.method === "GET") {
+      if (!isAuthWindowOpen()) {
+        return new Response("Not Found", { status: 404 });
+      }
+
+      const code = url.searchParams.get("code");
+      const realmId = url.searchParams.get("realmId");
+      const state = url.searchParams.get("state");
+
+      if (!code || !realmId || !state) {
+        return new Response(callbackHtml("Missing parameters", false), {
+          status: 400,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+
+      if (!validateState(state)) {
+        return new Response(callbackHtml("Invalid or expired state", false), {
+          status: 403,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+
+      const creds = getQBOCredentials();
+      if (!creds?.clientId || !creds?.clientSecret) {
+        return new Response(callbackHtml("Server credentials not configured", false), {
+          status: 500,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+
+      const redirectUri = creds.redirectUri || `https://${req.headers.get("host")}/oauth/callback`;
+
+      try {
+        await exchangeCode(code, realmId, creds.clientId, creds.clientSecret, redirectUri);
+        return new Response(callbackHtml("Authorization successful! You can close this tab.", true), {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        });
+      } catch (err) {
+        console.error("OAuth token exchange failed:", err instanceof Error ? err.message : err);
+        return new Response(callbackHtml("Token exchange failed. Check server logs.", false), {
+          status: 500,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+    }
+
+    // ── MCP endpoint — loopback only (defense in depth) ──
     if (url.pathname === "/mcp") {
+      // Reject requests forwarded from external sources via reverse proxy
+      const forwarded = req.headers.get("x-forwarded-for");
+      if (forwarded) {
+        return new Response("Forbidden", { status: 403 });
+      }
+
       if (isRateLimited()) {
         return new Response("Rate limit exceeded", { status: 429 });
       }
@@ -855,7 +1055,7 @@ const httpServer = Bun.serve({
 });
 
 console.log(`mcp-accounting listening on http://0.0.0.0:${PORT}/mcp`);
-console.log("Tools: 7 (Phase 1 + 2A) | PDF: pdfmake | QBO: deferred to Phase 2B");
+console.log("Tools: 11 (Phase 1 + 2A + 2B) | PDF: pdfmake | QBO: OAuth2 ready");
 
 process.on("SIGTERM", () => {
   httpServer.stop();
