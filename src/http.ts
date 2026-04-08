@@ -314,8 +314,33 @@ async function complianceCheck(): Promise<string> {
   const year = now.getFullYear();
   const lines: string[] = ["## Compliance Deadlines", ""];
 
+  // Query Second Brain for filed items to filter out completed deadlines
+  const filedItems = new Set<string>();
+  try {
+    const results = await brainSearch("filed tax form modelo", {
+      category: "decision",
+      status: "done",
+      limit: 30,
+    });
+    // Extract filed form names from results (match known deadline names)
+    const resultLower = results.toLowerCase();
+    for (const item of COMPLIANCE_CALENDAR) {
+      // Check if the item name (or key parts) appears in a "done" decision entry
+      const nameLower = item.name.toLowerCase();
+      // Extract the core form identifier (e.g., "1120" from "Form 1120 (Corporate Tax)")
+      const coreMatch = item.name.match(/(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i);
+      const coreId = coreMatch ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase() : nameLower;
+      if (resultLower.includes(coreId) && resultLower.includes("filed")) {
+        filedItems.add(item.name);
+      }
+    }
+  } catch {
+    // Second Brain unavailable — proceed without filtering
+  }
+
   const upcoming: { name: string; deadline: string; daysUntil: number; description: string }[] = [];
   const overdue: typeof upcoming = [];
+  const completed: typeof upcoming = [];
 
   for (const item of COMPLIANCE_CALENDAR) {
     const [mm, dd] = item.deadline.split("-").map(Number);
@@ -326,8 +351,13 @@ async function complianceCheck(): Promise<string> {
 
       if (daysUntil >= -30 && daysUntil <= 90) {
         const entry = { name: item.name, deadline: `${y}-${item.deadline}`, daysUntil, description: item.description };
-        if (daysUntil < 0) overdue.push(entry);
-        else upcoming.push(entry);
+        if (filedItems.has(item.name)) {
+          completed.push(entry);
+        } else if (daysUntil < 0) {
+          overdue.push(entry);
+        } else {
+          upcoming.push(entry);
+        }
       }
     }
   }
@@ -349,7 +379,15 @@ async function complianceCheck(): Promise<string> {
     lines.push("");
   }
 
-  if (overdue.length === 0 && upcoming.length === 0) {
+  if (completed.length > 0) {
+    lines.push("### ✅ Filed");
+    for (const item of completed.sort((a, b) => a.daysUntil - b.daysUntil)) {
+      lines.push(`- ~~${item.name}~~ — ${item.deadline} — ${item.description}`);
+    }
+    lines.push("");
+  }
+
+  if (overdue.length === 0 && upcoming.length === 0 && completed.length === 0) {
     lines.push("No deadlines within the next 90 days.");
   }
 
