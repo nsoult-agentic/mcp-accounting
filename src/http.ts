@@ -672,15 +672,24 @@ async function paystubGenerate(params: {
   year: number;
   monthlySalary: number;
   dryRun: boolean;
+  federalWithholding?: number;
+  socialSecurity?: number;
+  medicare?: number;
 }): Promise<string> {
   if (params.year < 2020 || params.year > 2030) {
     return `Error: Year must be between 2020 and 2030.`;
   }
 
-  // 1. Calculate payroll (uses current TAX_CONFIG rates — acceptable for historical stubs
-  // where the purpose is formatting, not precise tax recalculation)
+  // 1. Calculate payroll or use overrides
   const payroll = calculatePayroll(params.monthlySalary, params.month);
   const mn = monthName(params.month);
+
+  // If explicit deduction amounts are provided, use them (for recreating historical stubs)
+  const fedTax = params.federalWithholding ?? payroll.federalWithholding;
+  const ssTax = params.socialSecurity ?? payroll.socialSecurity;
+  const medTax = params.medicare ?? payroll.medicare;
+  const totalDeductions = fedTax + ssTax + medTax;
+  const netPay = params.monthlySalary - totalDeductions;
 
   // 2. Build paystub data
   const paystubData: PaystubData = {
@@ -688,14 +697,14 @@ async function paystubGenerate(params: {
     entity: COMPANY.name,
     period: `${mn} ${params.year}`,
     payDate: `${String(params.month).padStart(2, "0")}/15/${params.year}`,
-    gross: payroll.grossPay,
+    gross: params.monthlySalary,
     deductions: [
-      { label: "Federal Income Tax", amount: payroll.federalWithholding },
-      { label: "Social Security (6.2%)", amount: payroll.socialSecurity },
-      { label: "Medicare (1.45%)", amount: payroll.medicare },
+      { label: "Federal Income Tax", amount: fedTax },
+      { label: "Social Security (6.2%)", amount: ssTax },
+      { label: "Medicare (1.45%)", amount: medTax },
     ],
-    netPay: payroll.netPay,
-    ytdGross: payroll.ytdGross,
+    netPay,
+    ytdGross: params.monthlySalary * params.month,
     employerCosts: [
       { label: "Employer Social Security (6.2%)", amount: payroll.employerSocialSecurity },
       { label: "Employer Medicare (1.45%)", amount: payroll.employerMedicare },
@@ -718,10 +727,10 @@ async function paystubGenerate(params: {
     `| Field | Value |`,
     `|-------|-------|`,
     `| Employee | Neil Soult |`,
-    `| Gross Pay | $${payroll.grossPay.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-    `| Total Deductions | -$${payroll.totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-    `| **Net Pay** | **$${payroll.netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
-    `| YTD Gross | $${payroll.ytdGross.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    `| Gross Pay | $${params.monthlySalary.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    `| Total Deductions | -$${totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    `| **Net Pay** | **$${netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
+    `| YTD Gross | $${(params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
   ];
 
   // 5. Upload
@@ -887,12 +896,15 @@ function createServer(): McpServer {
 
   server.tool(
     "accounting-payroll-paystub",
-    "Generate a pay stub PDF for a given month. Renders PDF, uploads to NextCloud.",
+    "Generate a pay stub PDF for a given month. Renders PDF, uploads to NextCloud. Optional override params for recreating historical stubs with actual withholding amounts.",
     {
       month: z.number().int().min(1).max(12).describe("Month (1-12)"),
       year: z.number().int().min(2020).max(2030).default(2026).describe("Year"),
       monthlySalary: z.number().positive().describe("Monthly gross salary in USD"),
       dryRun: z.boolean().default(false).describe("If true, generate PDF but don't upload"),
+      federalWithholding: z.number().nonnegative().optional().describe("Override: actual federal tax withheld (skip calculation)"),
+      socialSecurity: z.number().nonnegative().optional().describe("Override: actual SS tax withheld (skip calculation)"),
+      medicare: z.number().nonnegative().optional().describe("Override: actual Medicare tax withheld (skip calculation)"),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await paystubGenerate(params)) }],
