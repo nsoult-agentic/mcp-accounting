@@ -716,9 +716,7 @@ async function paystubGenerate(params: {
     ],
   };
 
-  // Filter out zero-value deductions
-  paystubData.deductions = paystubData.deductions.filter((d) => d.amount > 0);
-  paystubData.employerCosts = paystubData.employerCosts.filter((d) => d.amount > 0);
+  // Show all deduction lines including $0 (e.g., exempt federal withholding)
 
   // 3. Render PDF
   const renderer = createRenderer();
