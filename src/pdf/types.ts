@@ -51,6 +51,7 @@ export interface PaystubData {
   payDate: string; // MM/DD/YYYY
   gross: number;
   deductions: PaystubDeduction[];
+  adjustments?: PaystubDeduction[]; // e.g., catch-up withholding corrections
   netPay: number;
   ytdGross: number;
   employerCosts: PaystubDeduction[];

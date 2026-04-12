@@ -294,6 +294,40 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
       margin: [0, 0, 0, 15],
     },
 
+    // Adjustments (optional — only rendered if present)
+    ...(data.adjustments && data.adjustments.length > 0
+      ? [
+          { text: "Adjustments", bold: true, fontSize: 11, margin: [0, 0, 0, 5] } as Content,
+          {
+            table: {
+              widths: ["*", "auto"],
+              body: [
+                ...data.adjustments.map((a) => [
+                  { text: a.label, fontSize: 9 },
+                  { text: `-${usd(a.amount)}`, fontSize: 9, alignment: "right" },
+                ]),
+                [
+                  { text: "Total Adjustments", fontSize: 9, bold: true },
+                  {
+                    text: `-${usd(data.adjustments.reduce((s, a) => s + a.amount, 0))}`,
+                    fontSize: 9, alignment: "right", bold: true,
+                  },
+                ],
+              ],
+            },
+            layout: {
+              hLineWidth: (i: number, node: any) =>
+                i === 0 || i === node.table.body.length ? 1 : 0,
+              vLineWidth: () => 0,
+              hLineColor: () => GRAY_LINE,
+              paddingTop: () => 4,
+              paddingBottom: () => 4,
+            },
+            margin: [0, 0, 0, 15],
+          } as Content,
+        ]
+      : []),
+
     // Net Pay — dark blue background, white text
     {
       table: {

@@ -675,6 +675,7 @@ async function paystubGenerate(params: {
   federalWithholding?: number;
   socialSecurity?: number;
   medicare?: number;
+  adjustments?: { label: string; amount: number }[];
 }): Promise<string> {
   if (params.year < 2020 || params.year > 2030) {
     return `Error: Year must be between 2020 and 2030.`;
@@ -689,7 +690,8 @@ async function paystubGenerate(params: {
   const ssTax = params.socialSecurity ?? payroll.socialSecurity;
   const medTax = params.medicare ?? payroll.medicare;
   const totalDeductions = fedTax + ssTax + medTax;
-  const netPay = params.monthlySalary - totalDeductions;
+  const totalAdjustments = (params.adjustments || []).reduce((s, a) => s + a.amount, 0);
+  const netPay = params.monthlySalary - totalDeductions - totalAdjustments;
 
   // 2. Build paystub data
   const paystubData: PaystubData = {
@@ -703,6 +705,7 @@ async function paystubGenerate(params: {
       { label: "Social Security (6.2%)", amount: ssTax },
       { label: "Medicare (1.45%)", amount: medTax },
     ],
+    adjustments: params.adjustments && params.adjustments.length > 0 ? params.adjustments : undefined,
     netPay,
     ytdGross: params.monthlySalary * params.month,
     employerCosts: [
@@ -729,6 +732,7 @@ async function paystubGenerate(params: {
     `| Employee | Neilson Soult |`,
     `| Gross Pay | $${params.monthlySalary.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     `| Total Deductions | -$${totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    ...(totalAdjustments > 0 ? [`| Adjustments | -$${totalAdjustments.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`] : []),
     `| **Net Pay** | **$${netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
     `| YTD Gross | $${(params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
   ];
@@ -905,6 +909,10 @@ function createServer(): McpServer {
       federalWithholding: z.number().nonnegative().optional().describe("Override: actual federal tax withheld (skip calculation)"),
       socialSecurity: z.number().nonnegative().optional().describe("Override: actual SS tax withheld (skip calculation)"),
       medicare: z.number().nonnegative().optional().describe("Override: actual Medicare tax withheld (skip calculation)"),
+      adjustments: z.array(z.object({
+        label: z.string().describe("Adjustment description (e.g., 'Federal Tax Withholding Jan')"),
+        amount: z.number().nonnegative().describe("Adjustment amount"),
+      })).optional().describe("Additional adjustment line items (e.g., catch-up withholding corrections)"),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await paystubGenerate(params)) }],
