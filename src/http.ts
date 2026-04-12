@@ -268,7 +268,7 @@ async function payrollCalculate(params: {
 
   return `## Payroll Calculation — ${params.year} Month ${params.month}
 
-**Employee:** Neil Soult | **Entity:** SOULT IO LTD
+**Employee:** Neilson Soult | **Entity:** SOULT IO LTD
 
 | Item | Amount |
 |------|--------|
@@ -693,7 +693,7 @@ async function paystubGenerate(params: {
 
   // 2. Build paystub data
   const paystubData: PaystubData = {
-    employee: "Neil Soult",
+    employee: "Neilson Soult",
     entity: COMPANY.name,
     period: `${mn} ${params.year}`,
     payDate: `${String(params.month).padStart(2, "0")}/15/${params.year}`,
@@ -726,7 +726,7 @@ async function paystubGenerate(params: {
     ``,
     `| Field | Value |`,
     `|-------|-------|`,
-    `| Employee | Neil Soult |`,
+    `| Employee | Neilson Soult |`,
     `| Gross Pay | $${params.monthlySalary.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     `| Total Deductions | -$${totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     `| **Net Pay** | **$${netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,

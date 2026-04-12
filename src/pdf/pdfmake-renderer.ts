@@ -237,7 +237,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         body: [
           [
             { text: "Employee", bold: true, fillColor: LIGHT_BG, margin: [4, 4, 4, 4] },
-            { text: data.employee, fillColor: LIGHT_BG, margin: [4, 4, 4, 4] },
+            { text: data.employee, fillColor: LIGHT_BG, margin: [4, 4, 4, 4], alignment: "right" },
           ],
         ],
       },
