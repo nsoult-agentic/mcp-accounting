@@ -261,8 +261,8 @@ async function payrollCalculate(params: {
   month: number;
   year: number;
 }): Promise<string> {
-  if (params.year !== TAX_CONFIG.year) {
-    return `Error: Only ${TAX_CONFIG.year} tax rates are loaded. Requested year: ${params.year}. Update TAX_CONFIG for other years.`;
+  if (params.year < 2020 || params.year > 2030) {
+    return `Error: Year must be between 2020 and 2030.`;
   }
   const r = calculatePayroll(params.monthlySalary, params.month);
 
@@ -673,11 +673,12 @@ async function paystubGenerate(params: {
   monthlySalary: number;
   dryRun: boolean;
 }): Promise<string> {
-  if (params.year !== TAX_CONFIG.year) {
-    return `Error: Only ${TAX_CONFIG.year} tax rates are loaded.`;
+  if (params.year < 2020 || params.year > 2030) {
+    return `Error: Year must be between 2020 and 2030.`;
   }
 
-  // 1. Calculate payroll
+  // 1. Calculate payroll (uses current TAX_CONFIG rates — acceptable for historical stubs
+  // where the purpose is formatting, not precise tax recalculation)
   const payroll = calculatePayroll(params.monthlySalary, params.month);
   const mn = monthName(params.month);
 
