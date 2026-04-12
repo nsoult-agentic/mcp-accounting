@@ -14,8 +14,7 @@ services:
 
     # ── Network ──
     networks:
-      - default
-      - npm_network
+      - mcp_network
     ports:
       - "127.0.0.1:8906:8906"  # Loopback for direct MCP calls
 
@@ -57,12 +56,9 @@ services:
       - SECRETS_DIR=/secrets
       - PORT=8906
       - TOKENS_DIR=/tokens
-      - NEXTCLOUD_MCP_URL=http://host.docker.internal:8902/mcp
-      - SECOND_BRAIN_MCP_URL=http://host.docker.internal:8904/mcp
+      - NEXTCLOUD_MCP_URL=http://mcp-nextcloud:8902/mcp
+      - SECOND_BRAIN_MCP_URL=http://mcp-second-brain:8904/mcp
       # NEVER put credentials here — read from /secrets/quickbooks.env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
 networks:
-  npm_network:
+  mcp_network:
     external: true
