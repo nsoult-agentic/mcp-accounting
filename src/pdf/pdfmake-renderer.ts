@@ -37,11 +37,15 @@ async function pdfToBuffer(docDefinition: DocDefinition): Promise<Buffer> {
   return doc.getBuffer();
 }
 
-// ── Colors ────────────────────────────────────────────
+// ── Colors (Brand: Black + White + Dark Royal Blue accent) ──
 
+const ACCENT_BLUE = "#1A3B6E";
+const DARK_TEXT = "#000000";
+const GRAY_LINE = "#D1D5DB";
+const LIGHT_BG = "#F5F5F5";
+
+// Invoice colors (kept separate — invoices may have different branding later)
 const BLUE_HEADER = "#3B82F6";
-const LIGHT_BG = "#EFF6FF";
-const DARK_TEXT = "#1F2937";
 const GRAY_TEXT = "#6B7280";
 
 // ── Invoice Renderer ──────────────────────────────────
@@ -151,7 +155,7 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
         hLineWidth: (i: number, node: any) =>
           i === 0 || i === 1 || i === node.table.body.length ? 1 : 0,
         vLineWidth: () => 0,
-        hLineColor: () => "#D1D5DB",
+        hLineColor: () => GRAY_LINE,
         paddingTop: () => 6,
         paddingBottom: () => 6,
       },
@@ -201,7 +205,7 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
 function buildPaystubDoc(data: PaystubData): DocDefinition {
   const deductionRows: TableCell[][] = data.deductions.map((d) => [
     { text: d.label, fontSize: 9 },
-    { text: `-${usd(d.amount)}`, fontSize: 9, alignment: "right", color: "#DC2626" },
+    { text: `-${usd(d.amount)}`, fontSize: 9, alignment: "right" },
   ]);
 
   const employerRows: TableCell[][] = data.employerCosts.map((d) => [
@@ -216,7 +220,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         {
           width: "*",
           stack: [
-            { text: "PAY STUB", style: "title" },
+            { text: "PAY STUB", style: "title", color: DARK_TEXT },
             { text: data.entity, bold: true, fontSize: 11, margin: [0, 4, 0, 0] },
           ],
         },
@@ -261,7 +265,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
       layout: {
         hLineWidth: (i: number) => (i === 0 || i === 1 ? 1 : 0),
         vLineWidth: () => 0,
-        hLineColor: () => "#D1D5DB",
+        hLineColor: () => GRAY_LINE,
         paddingTop: () => 4,
         paddingBottom: () => 4,
       },
@@ -279,7 +283,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
             { text: "Total Deductions", fontSize: 9, bold: true },
             {
               text: `-${usd(data.deductions.reduce((s, d) => s + d.amount, 0))}`,
-              fontSize: 9, alignment: "right", bold: true, color: "#DC2626",
+              fontSize: 9, alignment: "right", bold: true,
             },
           ],
         ],
@@ -288,36 +292,33 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         hLineWidth: (i: number, node: any) =>
           i === 0 || i === node.table.body.length ? 1 : 0,
         vLineWidth: () => 0,
-        hLineColor: () => "#D1D5DB",
+        hLineColor: () => GRAY_LINE,
         paddingTop: () => 4,
         paddingBottom: () => 4,
       },
       margin: [0, 0, 0, 15],
     },
 
-    // Net Pay
+    // Net Pay — dark blue background, white text
     {
       table: {
         widths: ["*", "auto"],
         body: [
           [
-            { text: "NET PAY", fontSize: 14, bold: true },
-            { text: usd(data.netPay), fontSize: 14, bold: true, alignment: "right", color: "#059669" },
+            { text: "NET PAY", fontSize: 14, bold: true, color: "#FFFFFF", fillColor: ACCENT_BLUE, margin: [8, 8, 8, 8] },
+            { text: usd(data.netPay), fontSize: 14, bold: true, alignment: "right", color: "#FFFFFF", fillColor: ACCENT_BLUE, margin: [8, 8, 8, 8] },
           ],
         ],
       },
       layout: {
-        hLineWidth: (i: number) => (i === 0 || i === 1 ? 2 : 0),
+        hLineWidth: () => 0,
         vLineWidth: () => 0,
-        hLineColor: () => BLUE_HEADER,
-        paddingTop: () => 8,
-        paddingBottom: () => 8,
       },
       margin: [0, 0, 0, 20],
     },
 
     // Employer Taxes
-    { text: "Employer Taxes", bold: true, fontSize: 11, color: GRAY_TEXT, margin: [0, 0, 0, 5] },
+    { text: "Employer Taxes", bold: true, fontSize: 11, margin: [0, 0, 0, 5] },
     {
       table: {
         widths: ["*", "auto"],
@@ -336,7 +337,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         hLineWidth: (i: number, node: any) =>
           i === 0 || i === node.table.body.length ? 1 : 0,
         vLineWidth: () => 0,
-        hLineColor: () => "#D1D5DB",
+        hLineColor: () => GRAY_LINE,
         paddingTop: () => 4,
         paddingBottom: () => 4,
       },
@@ -362,7 +363,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
     content,
     defaultStyle: { font: "Roboto", fontSize: 10, color: DARK_TEXT },
     styles: {
-      title: { fontSize: 18, bold: true, color: BLUE_HEADER },
+      title: { fontSize: 18, bold: true, color: DARK_TEXT },
     },
     pageMargins: [40, 40, 40, 40],
   };
