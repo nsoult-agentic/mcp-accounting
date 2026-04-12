@@ -14,7 +14,9 @@
  *   accounting-time-off-list       — List time off for a month
  *
  * SECURITY: Credentials read from /secrets/quickbooks.env (mounted from /srv/).
- * Credentials never appear in tool output. Generic error messages only.
+ * Employee data read from /secrets/employee-data.yaml (SSN, EIN, salary).
+ * PII never appears in tool output. SSN/EIN regex sanitizer on all responses.
+ * Generic error messages only — no PII in error output.
  *
  * Usage: PORT=8906 SECRETS_DIR=/secrets bun run src/http.ts
  */
@@ -130,6 +132,49 @@ function getQBOCredentials(): QBOCredentials | null {
   return _qboCreds;
 }
 
+// ── Employee Data Loading ──────────────────────────────────
+
+interface EmployeeData {
+  name: string;
+  monthlySalary: number;
+}
+
+function loadEmployeeData(): EmployeeData | null {
+  const path = resolve(SECRETS_DIR, "employee-data.yaml");
+  if (!existsSync(path)) {
+    console.warn("No employee-data.yaml found in secrets — payroll tools will use parameter fallback");
+    return null;
+  }
+  try {
+    const raw = readFileSync(path, "utf-8");
+    // Simple YAML parsing for flat key: value pairs (avoids adding a yaml dependency)
+    const data: Record<string, string> = {};
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const colon = trimmed.indexOf(":");
+      if (colon === -1) continue;
+      data[trimmed.slice(0, colon).trim()] = trimmed.slice(colon + 1).trim().replace(/^["']|["']$/g, "");
+    }
+    const salary = Number(data["monthly_salary"]);
+    if (!data["name"] || !salary || salary <= 0) {
+      console.error("employee-data.yaml missing required fields (name, monthly_salary)");
+      return null;
+    }
+    return { name: data["name"], monthlySalary: salary };
+  } catch {
+    console.error("Cannot read employee-data.yaml — check file permissions");
+    return null;
+  }
+}
+
+// Lazy-load employee data
+let _employeeData: EmployeeData | null | undefined;
+function getEmployeeData(): EmployeeData | null {
+  if (_employeeData === undefined) _employeeData = loadEmployeeData();
+  return _employeeData;
+}
+
 // ── Sanitize Output ────────────────────────────────────────
 
 function sanitize(s: string): string {
@@ -139,7 +184,10 @@ function sanitize(s: string): string {
     .replace(/\b(sk-|pk_|rk_|whsec_|xox[bpas]-)[A-Za-z0-9_-]{20,}/g, "[REDACTED]")
     .replace(/["']?access_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "access_token=[REDACTED]")
     .replace(/["']?refresh_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "refresh_token=[REDACTED]")
-    .replace(/http:\/\/host\.docker\.internal[^\s]*/g, "[internal]");
+    .replace(/http:\/\/host\.docker\.internal[^\s]*/g, "[internal]")
+    // PII sanitizer: catch any SSN (XXX-XX-XXXX) or EIN (XX-XXXXXXX) patterns
+    .replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[SSN-REDACTED]")
+    .replace(/\b\d{2}-\d{7}\b/g, "[EIN-REDACTED]");
 }
 
 // ── Tax Configuration (2026) ───────────────────────────────
@@ -253,18 +301,21 @@ function calculatePayroll(monthlySalary: number, month: number): PayrollResult {
 // ── Tool Handlers ──────────────────────────────────────────
 
 async function payrollCalculate(params: {
-  monthlySalary: number;
   month: number;
   year: number;
 }): Promise<string> {
   if (params.year !== TAX_CONFIG.year) {
     return `Error: Only ${TAX_CONFIG.year} tax rates are loaded. Requested year: ${params.year}. Update TAX_CONFIG for other years.`;
   }
-  const r = calculatePayroll(params.monthlySalary, params.month);
+  const emp = getEmployeeData();
+  if (!emp) {
+    return `Error: Employee data not configured. Place employee-data.yaml in the secrets volume.`;
+  }
+  const r = calculatePayroll(emp.monthlySalary, params.month);
 
   return `## Payroll Calculation — ${params.year} Month ${params.month}
 
-**Employee:** Neil Soult | **Entity:** SOULT IO LTD
+**Employee:** ${emp.name} | **Entity:** SOULT IO LTD
 
 | Item | Amount |
 |------|--------|
@@ -666,20 +717,23 @@ async function invoiceGenerate(params: {
 async function paystubGenerate(params: {
   month: number;
   year: number;
-  monthlySalary: number;
   dryRun: boolean;
 }): Promise<string> {
   if (params.year !== TAX_CONFIG.year) {
     return `Error: Only ${TAX_CONFIG.year} tax rates are loaded.`;
   }
+  const emp = getEmployeeData();
+  if (!emp) {
+    return `Error: Employee data not configured. Place employee-data.yaml in the secrets volume.`;
+  }
 
   // 1. Calculate payroll
-  const payroll = calculatePayroll(params.monthlySalary, params.month);
+  const payroll = calculatePayroll(emp.monthlySalary, params.month);
   const mn = monthName(params.month);
 
   // 2. Build paystub data
   const paystubData: PaystubData = {
-    employee: "Neil Soult",
+    employee: emp.name,
     entity: COMPANY.name,
     period: `${mn} ${params.year}`,
     payDate: `${String(params.month).padStart(2, "0")}/15/${params.year}`,
@@ -712,7 +766,7 @@ async function paystubGenerate(params: {
     ``,
     `| Field | Value |`,
     `|-------|-------|`,
-    `| Employee | Neil Soult |`,
+    `| Employee | ${emp.name} |`,
     `| Gross Pay | $${payroll.grossPay.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     `| Total Deductions | -$${payroll.totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     `| **Net Pay** | **$${payroll.netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
@@ -747,7 +801,7 @@ async function apiUsage(): Promise<string> {
 | Item | Status |
 |------|--------|
 | Server | Running on port ${PORT} |
-| Tools | 11 active |
+| Tools | 12 active |
 | QBO API | ${qboStatus} |
 | Tax Config | ${TAX_CONFIG.year} rates loaded |
 | PDF Renderer | pdfmake |
@@ -759,10 +813,11 @@ async function apiUsage(): Promise<string> {
 - **accounting-api-usage** — This status page
 
 **Phase 2A — PDF & Time Tracking:**
-- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
+- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud (reads salary internally)
 - **accounting-invoice-generate** — Generate invoice PDF + upload to NextCloud
 - **accounting-time-off-log** — Record sick day, vacation, or holiday
 - **accounting-time-off-list** — List time off for a month
+- **accounting-employee-status** — Check employee data configuration (field presence only)
 
 **Phase 2B — QuickBooks Online:**
 - **accounting-qbo-auth-url** — Generate OAuth2 authorization URL
@@ -802,18 +857,17 @@ function getQBOStatus(): string {
 function createServer(): McpServer {
   const server = new McpServer({
     name: "mcp-accounting",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 
   // ── Phase 1 Tools ──
 
   server.tool(
     "accounting-payroll-calculate",
-    "Calculate monthly payroll withholdings for SOULT IO LTD. Returns federal tax, FICA, net pay, and employer costs.",
+    "Calculate monthly payroll withholdings for SOULT IO LTD. Reads salary from internal employee data. Returns federal tax, FICA, net pay, and employer costs.",
     {
-      monthlySalary: z.number().positive().describe("Monthly gross salary in USD"),
       month: z.number().int().min(1).max(12).describe("Month number (1-12)"),
-      year: z.number().int().default(2026).describe("Tax year (default: 2026)"),
+      year: z.number().int().min(2020).max(2030).default(2026).describe("Tax year (default: 2026)"),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await payrollCalculate(params)) }],
@@ -882,16 +936,44 @@ function createServer(): McpServer {
 
   server.tool(
     "accounting-payroll-paystub",
-    "Generate a pay stub PDF for a given month. Uses payroll calculation, renders PDF, uploads to NextCloud.",
+    "Generate a pay stub PDF for a given month. Reads salary from internal employee data. Renders PDF, uploads to NextCloud.",
     {
       month: z.number().int().min(1).max(12).describe("Month (1-12)"),
-      year: z.number().int().default(2026).describe("Year"),
-      monthlySalary: z.number().positive().describe("Monthly gross salary in USD"),
+      year: z.number().int().min(2020).max(2030).default(2026).describe("Year"),
       dryRun: z.boolean().default(false).describe("If true, generate PDF but don't upload"),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await paystubGenerate(params)) }],
     }),
+  );
+
+  // ── Employee Data Tools ──
+
+  server.tool(
+    "accounting-employee-status",
+    "Check if employee data is configured. Returns field presence only — never values.",
+    {},
+    async () => {
+      const emp = getEmployeeData();
+      const path = resolve(SECRETS_DIR, "employee-data.yaml");
+      const fileExists = existsSync(path);
+      const fields = ["name", "monthly_salary"];
+      const status = fields.map((f) => {
+        if (!fileExists) return `| ${f} | Missing (no file) |`;
+        // Re-read to check individual fields without caching values
+        const raw = readFileSync(path, "utf-8");
+        const hasField = raw.split("\n").some((l) => l.trim().startsWith(f + ":"));
+        return `| ${f} | ${hasField ? "✅ Present" : "❌ Missing"} |`;
+      });
+      return {
+        content: [{
+          type: "text" as const,
+          text: sanitize(
+            `## Employee Data Status\n\n| Field | Status |\n|-------|--------|\n| file exists | ${fileExists ? "✅" : "❌"} |\n${status.join("\n")}\n| data loads | ${emp ? "✅" : "❌"} |`
+          ),
+        }],
+      };
+    },
   );
 
   // ── Phase 2B Tools (QBO OAuth + API) ──
