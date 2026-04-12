@@ -676,6 +676,7 @@ async function paystubGenerate(params: {
   socialSecurity?: number;
   medicare?: number;
   adjustments?: { label: string; amount: number }[];
+  ytdGross?: number;
 }): Promise<string> {
   if (params.year < 2020 || params.year > 2030) {
     return `Error: Year must be between 2020 and 2030.`;
@@ -707,7 +708,7 @@ async function paystubGenerate(params: {
     ],
     adjustments: params.adjustments && params.adjustments.length > 0 ? params.adjustments : undefined,
     netPay,
-    ytdGross: params.monthlySalary * params.month,
+    ytdGross: params.ytdGross ?? params.monthlySalary * params.month,
     employerCosts: [
       { label: "Employer Social Security (6.2%)", amount: payroll.employerSocialSecurity },
       { label: "Employer Medicare (1.45%)", amount: payroll.employerMedicare },
@@ -734,7 +735,7 @@ async function paystubGenerate(params: {
     `| Total Deductions | -$${totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     ...(totalAdjustments > 0 ? [`| Adjustments | -$${totalAdjustments.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`] : []),
     `| **Net Pay** | **$${netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
-    `| YTD Gross | $${(params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+    `| YTD Gross | $${(params.ytdGross ?? params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
   ];
 
   // 5. Upload
@@ -913,6 +914,7 @@ function createServer(): McpServer {
         label: z.string().describe("Adjustment description (e.g., 'Federal Tax Withholding Jan')"),
         amount: z.number().nonnegative().describe("Adjustment amount"),
       })).optional().describe("Additional adjustment line items (e.g., catch-up withholding corrections)"),
+      ytdGross: z.number().nonnegative().optional().describe("Override: actual YTD gross (for mid-year salary changes). If omitted, calculated as monthlySalary × month."),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await paystubGenerate(params)) }],
