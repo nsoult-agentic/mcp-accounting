@@ -208,11 +208,6 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
     { text: `-${usd(d.amount)}`, fontSize: 9, alignment: "right" },
   ]);
 
-  const employerRows: TableCell[][] = data.employerCosts.map((d) => [
-    { text: d.label, fontSize: 9 },
-    { text: usd(d.amount), fontSize: 9, alignment: "right" },
-  ]);
-
   const content: Content[] = [
     // Header
     {
@@ -315,33 +310,6 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         vLineWidth: () => 0,
       },
       margin: [0, 0, 0, 20],
-    },
-
-    // Employer Taxes
-    { text: "Employer Taxes", bold: true, fontSize: 11, margin: [0, 0, 0, 5] },
-    {
-      table: {
-        widths: ["*", "auto"],
-        body: [
-          ...employerRows,
-          [
-            { text: "Total Employer Cost", fontSize: 9, bold: true },
-            {
-              text: usd(data.gross + data.employerCosts.reduce((s, d) => s + d.amount, 0)),
-              fontSize: 9, alignment: "right", bold: true,
-            },
-          ],
-        ],
-      },
-      layout: {
-        hLineWidth: (i: number, node: any) =>
-          i === 0 || i === node.table.body.length ? 1 : 0,
-        vLineWidth: () => 0,
-        hLineColor: () => GRAY_LINE,
-        paddingTop: () => 4,
-        paddingBottom: () => 4,
-      },
-      margin: [0, 0, 0, 15],
     },
 
     // YTD
