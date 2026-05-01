@@ -15,6 +15,7 @@ services:
     # ── Network ──
     networks:
       - mcp_network
+      - brain
     ports:
       - "127.0.0.1:8906:8906"  # Loopback for direct MCP calls
 
@@ -62,3 +63,6 @@ services:
 networks:
   mcp_network:
     external: true
+  brain:
+    external: true
+    name: second-brain
