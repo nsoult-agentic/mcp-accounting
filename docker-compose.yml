@@ -8,7 +8,7 @@
 
 services:
   mcp-accounting:
-    image: ghcr.io/nsoult-agentic/mcp-accounting:sha-2cd8b37
+    image: ghcr.io/nsoult-agentic/mcp-accounting:sha-223070e
     container_name: mcp-accounting
     restart: unless-stopped
 
