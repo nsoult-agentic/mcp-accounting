@@ -2,23 +2,44 @@
  * PostgreSQL database module for structured accounting data.
  * Uses the existing Second Brain PostgreSQL instance with a separate `accounting` schema.
  *
+ * Connection: hardcoded to second-brain-db on mcp_network.
+ * Password: read from /secrets/db-password (same pattern as mcp-second-brain).
+ *
  * Tables: time_off, compliance_filings, payroll_runs
  * All DDL is idempotent (CREATE IF NOT EXISTS).
  *
- * If DATABASE_URL is not set, all functions gracefully return null/empty
+ * If the password file is missing, all functions gracefully return null/empty
  * and callers fall back to brain-search/brain-store.
  */
 import pg from "pg";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-const DATABASE_URL = process.env["DATABASE_URL"];
+const SECRETS_DIR = process.env["SECRETS_DIR"] || "/secrets";
+
+function loadDbPassword(): string | null {
+  const path = resolve(SECRETS_DIR, "db-password");
+  try {
+    const pw = readFileSync(path, "utf-8").trim();
+    return pw.length > 0 ? pw : null;
+  } catch {
+    return null;
+  }
+}
+
+const DB_PASSWORD = loadDbPassword();
 
 let pool: pg.Pool | null = null;
 
 export function getPool(): pg.Pool | null {
-  if (!DATABASE_URL) return null;
+  if (!DB_PASSWORD) return null;
   if (!pool) {
     pool = new pg.Pool({
-      connectionString: DATABASE_URL,
+      host: "second-brain-db",
+      port: 5432,
+      database: "second_brain",
+      user: "pai",
+      password: DB_PASSWORD,
       max: 5,
       connectionTimeoutMillis: 5000,
       idleTimeoutMillis: 30000,
@@ -31,7 +52,7 @@ export function getPool(): pg.Pool | null {
 }
 
 export function isDbAvailable(): boolean {
-  return !!DATABASE_URL;
+  return !!DB_PASSWORD;
 }
 
 // ── Schema Initialization ─────────────────────────────────
@@ -39,7 +60,7 @@ export function isDbAvailable(): boolean {
 export async function initSchema(): Promise<void> {
   const p = getPool();
   if (!p) {
-    console.warn("DATABASE_URL not set — database features disabled, using Second Brain fallback");
+    console.warn("No db-password in secrets — database features disabled, using Second Brain fallback");
     return;
   }
 
