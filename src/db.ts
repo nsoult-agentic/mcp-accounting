@@ -151,6 +151,19 @@ export async function dbTimeOffList(
   return result.rows;
 }
 
+export async function dbTimeOffDelete(
+  date: string,
+): Promise<{ date: string; type: string; note: string } | null> {
+  const p = getPool();
+  if (!p) throw new Error("Database not configured");
+  const result = await p.query(
+    `DELETE FROM accounting.time_off WHERE date = $1
+     RETURNING date::text, type, COALESCE(note, '') AS note`,
+    [date],
+  );
+  return result.rows[0] ?? null;
+}
+
 // ── Compliance Operations ─────────────────────────────────
 
 export async function dbComplianceFiled(

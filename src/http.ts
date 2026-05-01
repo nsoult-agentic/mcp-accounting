@@ -12,6 +12,7 @@
  *   accounting-payroll-paystub     — Generate pay stub PDF, upload to NextCloud
  *   accounting-time-off-log        — Record a day off (sick/vacation/holiday)
  *   accounting-time-off-list       — List time off for a month
+ *   accounting-time-off-delete     — Delete a time-off entry by date
  *
  * SECURITY: Credentials read from /secrets/quickbooks.env (mounted from /srv/).
  * SSN/EIN regex sanitizer on all responses (defense-in-depth).
@@ -45,6 +46,7 @@ import {
   isDbAvailable,
   dbTimeOffInsert,
   dbTimeOffList,
+  dbTimeOffDelete,
   dbComplianceFiled,
   dbComplianceGetFiled,
   dbPayrollInsert,
@@ -569,6 +571,23 @@ async function timeOffList(params: {
   return { markdown, daysOff, brainUnavailable: dataUnavailable };
 }
 
+async function timeOffDelete(params: { date: string }): Promise<string> {
+  if (!isDbAvailable()) {
+    return "Error: Database not available — time-off deletion requires database access.";
+  }
+  try {
+    const deleted = await dbTimeOffDelete(params.date);
+    if (!deleted) {
+      return `No time-off entry found for ${params.date}.`;
+    }
+    const [y, m] = params.date.split("-").map(Number);
+    const mn = monthName(m);
+    return `## Time Off Deleted\n\n- **Date:** ${deleted.date}\n- **Type:** ${deleted.type}\n- **Note:** ${deleted.note || "—"}\n\nRemoved from database.\n\n*Note: If an invoice for ${mn} ${y} was already generated, it may need to be regenerated to reflect the updated work days.*`;
+  } catch (err) {
+    return `Error deleting time off: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
+
 // ── Invoice Generation ─────────────────────────────────────
 
 async function fetchLogo(): Promise<Buffer | undefined> {
@@ -857,7 +876,7 @@ async function apiUsage(): Promise<string> {
 | Item | Status |
 |------|--------|
 | Server | Running on port ${PORT} |
-| Tools | 12 active |
+| Tools | 13 active |
 | Database | ${isDbAvailable() ? "PostgreSQL connected" : "Not configured (using Second Brain fallback)"} |
 | QBO API | ${qboStatus} |
 | Tax Config | ${TAX_CONFIG.year} rates loaded |
@@ -875,6 +894,7 @@ async function apiUsage(): Promise<string> {
 - **accounting-invoice-generate** — Generate invoice PDF + upload to NextCloud
 - **accounting-time-off-log** — Record sick day, vacation, or holiday
 - **accounting-time-off-list** — List time off for a month
+- **accounting-time-off-delete** — Delete a time-off entry by date
 
 **QuickBooks Online:**
 - **accounting-qbo-auth-url** — Generate OAuth2 authorization URL
@@ -989,6 +1009,17 @@ function createServer(): McpServer {
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize((await timeOffList(params)).markdown) }],
+    }),
+  );
+
+  server.tool(
+    "accounting-time-off-delete",
+    "Delete a time-off entry by date. Use when scheduled time off is cancelled.",
+    {
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date to delete (YYYY-MM-DD)"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize(await timeOffDelete(params)) }],
     }),
   );
 
