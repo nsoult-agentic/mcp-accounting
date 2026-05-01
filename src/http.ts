@@ -41,6 +41,15 @@ import {
   brainSearch,
 } from "./mcp-client.js";
 import {
+  initSchema,
+  isDbAvailable,
+  dbTimeOffInsert,
+  dbTimeOffList,
+  dbComplianceFiled,
+  dbComplianceGetFiled,
+  dbPayrollInsert,
+} from "./db.js";
+import {
   generateAuthUrl,
   validateState,
   isAuthWindowOpen,
@@ -318,28 +327,29 @@ async function complianceCheck(): Promise<string> {
   const year = now.getFullYear();
   const lines: string[] = ["## Compliance Deadlines", ""];
 
-  // Query Second Brain for filed items to filter out completed deadlines
-  const filedItems = new Set<string>();
-  try {
-    const results = await brainSearch("filed tax form modelo", {
-      category: "decision",
-      status: "done",
-      limit: 30,
-    });
-    // Extract filed form names from results (match known deadline names)
-    const resultLower = results.toLowerCase();
-    for (const item of COMPLIANCE_CALENDAR) {
-      // Check if the item name (or key parts) appears in a "done" decision entry
-      const nameLower = item.name.toLowerCase();
-      // Extract the core form identifier (e.g., "1120" from "Form 1120 (Corporate Tax)")
-      const coreMatch = item.name.match(/(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i);
-      const coreId = coreMatch ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase() : nameLower;
-      if (resultLower.includes(coreId) && resultLower.includes("filed")) {
-        filedItems.add(item.name);
+  // Get filed items — DB primary, brain-search fallback
+  let filedItems: Set<string>;
+  if (isDbAvailable()) {
+    filedItems = await dbComplianceGetFiled([year, year + 1]);
+  } else {
+    filedItems = new Set<string>();
+    try {
+      const results = await brainSearch("filed tax form modelo", {
+        category: "decision",
+        status: "done",
+        limit: 30,
+      });
+      const resultLower = results.toLowerCase();
+      for (const item of COMPLIANCE_CALENDAR) {
+        const coreMatch = item.name.match(/(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i);
+        const coreId = coreMatch ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase() : item.name.toLowerCase();
+        if (resultLower.includes(coreId) && resultLower.includes("filed")) {
+          filedItems.add(item.name);
+        }
       }
+    } catch {
+      // Unavailable — proceed without filtering
     }
-  } catch {
-    // Second Brain unavailable — proceed without filtering
   }
 
   const upcoming: { name: string; deadline: string; daysUntil: number; description: string }[] = [];
@@ -399,6 +409,59 @@ async function complianceCheck(): Promise<string> {
   return lines.join("\n");
 }
 
+// ── Compliance Filed ──────────────────────────────────────
+
+const COMPLIANCE_NAMES = COMPLIANCE_CALENDAR.map((c) => c.name);
+
+async function complianceFiled(params: {
+  name: string;
+  taxYear: number;
+  filedDate: string;
+  method: string;
+  note: string;
+}): Promise<string> {
+  // Validate name matches a known calendar entry
+  if (!COMPLIANCE_NAMES.includes(params.name)) {
+    return `Error: Unknown deadline "${params.name}". Valid names:\n${COMPLIANCE_NAMES.map((n) => `- ${n}`).join("\n")}`;
+  }
+
+  if (isDbAvailable()) {
+    try {
+      const { action } = await dbComplianceFiled(
+        params.name, params.taxYear, params.filedDate, params.method, params.note,
+      );
+      return `## Compliance Filing Recorded
+
+- **Deadline:** ${params.name}
+- **Tax Year:** ${params.taxYear}
+- **Filed Date:** ${params.filedDate}
+- **Method:** ${params.method || "—"}
+- **Note:** ${params.note || "—"}
+
+Status: ${action === "inserted" ? "New filing recorded" : "Existing filing updated"}.`;
+    } catch (err) {
+      return `Error recording filing: ${err instanceof Error ? err.message : "unknown error"}`;
+    }
+  }
+
+  // Fallback: brain-store
+  try {
+    const title = `Filed ${params.name} for ${params.taxYear}`;
+    const text = `Filed ${params.name} for tax year ${params.taxYear} on ${params.filedDate}. Method: ${params.method || "not specified"}. ${params.note || ""}`;
+    await brainStore(title, text, "decision", "done");
+    return `## Compliance Filing Recorded
+
+- **Deadline:** ${params.name}
+- **Tax Year:** ${params.taxYear}
+- **Filed Date:** ${params.filedDate}
+- **Method:** ${params.method || "—"}
+
+Stored in Second Brain (database not configured).`;
+  } catch (err) {
+    return `Error recording filing: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
+
 // ── Time Off ───────────────────────────────────────────────
 
 const TIMEOFF_PREFIX = "TIMEOFF";
@@ -419,10 +482,14 @@ async function timeOffLog(params: {
   // RT-006: Sanitize note — strip newlines, limit length
   const cleanNote = (params.note || "").replace(/[\n\r]/g, " ").slice(0, 200).trim();
 
-  const title = `${TIMEOFF_PREFIX}:${params.date}:${params.type}`;
-  const text = `Time off record. Date: ${params.date}. Type: ${params.type}. Note: ${cleanNote || "none"}.`;
-
   try {
+    if (isDbAvailable()) {
+      await dbTimeOffInsert(params.date, params.type, cleanNote);
+      return `## Time Off Logged\n\n- **Date:** ${params.date}\n- **Type:** ${params.type}\n- **Note:** ${cleanNote || "—"}\n\nStored in database.`;
+    }
+    // Fallback: Second Brain
+    const title = `${TIMEOFF_PREFIX}:${params.date}:${params.type}`;
+    const text = `Time off record. Date: ${params.date}. Type: ${params.type}. Note: ${cleanNote || "none"}.`;
     await brainStore(title, text, "task", "active");
     return `## Time Off Logged\n\n- **Date:** ${params.date}\n- **Type:** ${params.type}\n- **Note:** ${cleanNote || "—"}\n\nStored in Second Brain.`;
   } catch (err) {
@@ -434,54 +501,60 @@ async function timeOffList(params: {
   month: number;
   year: number;
 }): Promise<{ markdown: string; daysOff: DayOff[]; brainUnavailable: boolean }> {
-  const monthStr = String(params.month).padStart(2, "0");
-  const query = `${TIMEOFF_PREFIX} ${params.year}-${monthStr}`;
-
   let daysOff: DayOff[] = [];
-  let brainUnavailable = false;
-  try {
-    const results = await brainSearch(query, {
-      mode: "fulltext",
-      category: "task",
-      status: "active",
-      limit: 31,
-    });
+  let dataUnavailable = false;
 
-    // Parse results — each line starting with # is an entry
-    // Format from brain-search: "[N] #ID — TIMEOFF:YYYY-MM-DD:type"
-    const lines = results.split("\n");
-    for (const line of lines) {
-      const match = line.match(/TIMEOFF:(\d{4}-\d{2}-\d{2}):(\w+)/);
-      if (match) {
-        const [, date, type] = match;
-        // Only include entries matching the requested month
-        if (date.startsWith(`${params.year}-${monthStr}`)) {
-          // Extract note from the content line if available
-          const noteMatch = line.match(/Note:\s*([^.]+)/);
-          daysOff.push({ date, type, note: noteMatch?.[1]?.trim() });
+  if (isDbAvailable()) {
+    // Primary: PostgreSQL
+    try {
+      const rows = await dbTimeOffList(params.year, params.month);
+      daysOff = rows.map((r) => ({ date: r.date, type: r.type, note: r.note || undefined }));
+    } catch {
+      dataUnavailable = true;
+    }
+  } else {
+    // Fallback: Second Brain
+    const monthStr = String(params.month).padStart(2, "0");
+    const query = `${TIMEOFF_PREFIX} ${params.year}-${monthStr}`;
+    try {
+      const results = await brainSearch(query, {
+        mode: "fulltext",
+        category: "task",
+        status: "active",
+        limit: 31,
+      });
+      const lines = results.split("\n");
+      for (const line of lines) {
+        const match = line.match(/TIMEOFF:(\d{4}-\d{2}-\d{2}):(\w+)/);
+        if (match) {
+          const [, date, type] = match;
+          if (date.startsWith(`${params.year}-${monthStr}`)) {
+            const noteMatch = line.match(/Note:\s*([^.]+)/);
+            daysOff.push({ date, type, note: noteMatch?.[1]?.trim() });
+          }
         }
       }
+    } catch {
+      dataUnavailable = true;
     }
-  } catch {
-    brainUnavailable = true;
-  }
 
-  // Deduplicate by date
-  const seen = new Set<string>();
-  daysOff = daysOff.filter((d) => {
-    if (seen.has(d.date)) return false;
-    seen.add(d.date);
-    return true;
-  });
+    // Deduplicate by date (only needed for brain-search path)
+    const seen = new Set<string>();
+    daysOff = daysOff.filter((d) => {
+      if (seen.has(d.date)) return false;
+      seen.add(d.date);
+      return true;
+    });
+  }
 
   daysOff.sort((a, b) => a.date.localeCompare(b.date));
 
   const mn = monthName(params.month);
   let markdown = `## Time Off — ${mn} ${params.year}\n\n`;
-  if (brainUnavailable) {
-    markdown += "⚠️ **Warning: Second Brain is unavailable.** Time-off data could not be retrieved. Invoice generation will assume zero days off — verify before sending.\n\n";
+  if (dataUnavailable) {
+    markdown += "⚠️ **Warning: Data store is unavailable.** Time-off data could not be retrieved. Invoice generation will assume zero days off — verify before sending.\n\n";
   }
-  if (daysOff.length === 0 && !brainUnavailable) {
+  if (daysOff.length === 0 && !dataUnavailable) {
     markdown += "No time off recorded for this month.";
   } else if (daysOff.length === 0) {
     markdown += "No time off data available (see warning above).";
@@ -493,7 +566,7 @@ async function timeOffList(params: {
     markdown += `\n**Total days off:** ${daysOff.length}`;
   }
 
-  return { markdown, daysOff, brainUnavailable };
+  return { markdown, daysOff, brainUnavailable: dataUnavailable };
 }
 
 // ── Invoice Generation ─────────────────────────────────────
@@ -736,19 +809,39 @@ async function paystubGenerate(params: {
     `| YTD Gross | $${(params.ytdGross ?? params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
   ];
 
-  // 5. Upload
+  // 5. Upload, then persist to DB (DB write is LAST — after PDF + upload succeed)
+  let uploadPath: string | undefined;
   if (!params.dryRun) {
     const monthPadded = String(params.month).padStart(2, "0");
     const fileName = `paystub-${params.year}-${monthPadded}.pdf`;
-    const uploadPath = `/Shared/Payroll/${params.year}/${fileName}`;
+    uploadPath = `/Shared/Payroll/${params.year}/${fileName}`;
     try {
       await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
       summary.push(``, `**Uploaded to:** ${uploadPath}`);
     } catch (err) {
       summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
+      uploadPath = undefined;
     }
   } else {
     summary.push(``, `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`);
+  }
+
+  // 6. Persist payroll run to database (non-fatal if it fails)
+  if (!params.dryRun) {
+    await dbPayrollInsert({
+      month: params.month,
+      year: params.year,
+      grossPay: params.monthlySalary,
+      federalWithholding: fedTax,
+      socialSecurity: ssTax,
+      medicare: medTax,
+      totalDeductions,
+      netPay,
+      employerSs: payroll.employerSocialSecurity,
+      employerMedicare: payroll.employerMedicare,
+      employerFuta: payroll.employerFUTA,
+      payStubPath: uploadPath,
+    });
   }
 
   return summary.join("\n");
@@ -764,24 +857,26 @@ async function apiUsage(): Promise<string> {
 | Item | Status |
 |------|--------|
 | Server | Running on port ${PORT} |
-| Tools | 11 active |
+| Tools | 12 active |
+| Database | ${isDbAvailable() ? "PostgreSQL connected" : "Not configured (using Second Brain fallback)"} |
 | QBO API | ${qboStatus} |
 | Tax Config | ${TAX_CONFIG.year} rates loaded |
 | PDF Renderer | pdfmake |
 
 ### Available Tools
-**Phase 1 — Payroll & Compliance:**
+**Payroll & Compliance:**
 - **accounting-payroll-calculate** — Monthly payroll withholding calculation
+- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
 - **accounting-compliance-check** — Upcoming tax/compliance deadlines
+- **accounting-compliance-filed** — Record a compliance filing as complete
 - **accounting-api-usage** — This status page
 
-**Phase 2A — PDF & Time Tracking:**
-- **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
+**Invoicing & Time Tracking:**
 - **accounting-invoice-generate** — Generate invoice PDF + upload to NextCloud
 - **accounting-time-off-log** — Record sick day, vacation, or holiday
 - **accounting-time-off-list** — List time off for a month
 
-**Phase 2B — QuickBooks Online:**
+**QuickBooks Online:**
 - **accounting-qbo-auth-url** — Generate OAuth2 authorization URL
 - **accounting-qbo-status** — Check QBO connection status
 - **accounting-invoice-status** — Read invoices from QBO
@@ -819,7 +914,7 @@ function getQBOStatus(): string {
 function createServer(): McpServer {
   const server = new McpServer({
     name: "mcp-accounting",
-    version: "0.3.0",
+    version: "0.4.0",
   });
 
   // ── Phase 1 Tools ──
@@ -847,6 +942,21 @@ function createServer(): McpServer {
   );
 
   server.tool(
+    "accounting-compliance-filed",
+    "Record that a compliance deadline has been met (tax filed, payment made). Removes it from the overdue/upcoming list.",
+    {
+      name: z.enum(COMPLIANCE_NAMES as [string, ...string[]]).describe("Deadline name from compliance calendar"),
+      taxYear: z.number().int().min(2020).max(2030).describe("Tax year this filing covers (YYYY)"),
+      filedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date filed/paid (YYYY-MM-DD)"),
+      method: z.string().default("").describe("How it was filed (e.g., 'EFTPS auto-pay', 'mailed to IRS', 'via CPA')"),
+      note: z.string().default("").describe("Additional context"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize(await complianceFiled(params)) }],
+    }),
+  );
+
+  server.tool(
     "accounting-api-usage",
     "Show mcp-accounting server status, available tools, and connection status.",
     {},
@@ -859,7 +969,7 @@ function createServer(): McpServer {
 
   server.tool(
     "accounting-time-off-log",
-    "Record a day off (sick, vacation, holiday). Stores in Second Brain for invoice calculation.",
+    "Record a day off (sick, vacation, holiday). Used by invoice generator to calculate work days.",
     {
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date (YYYY-MM-DD)"),
       type: z.enum(["sick", "vacation", "holiday", "other"]).describe("Type of time off"),
@@ -1029,6 +1139,13 @@ function isRateLimited(): boolean {
   requestTimestamps.push(now);
   return false;
 }
+
+// ── Database Initialization ──────────────────────────────
+
+initSchema().catch((err) => {
+  console.error("Database initialization failed:", err instanceof Error ? err.message : err);
+  console.warn("Continuing without database — using Second Brain fallback");
+});
 
 // ── HTTP Server (stateless mode) ───────────────────────────
 
