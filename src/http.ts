@@ -311,6 +311,7 @@ const COMPLIANCE_CALENDAR = [
   { name: "Form 941 (Q4)", deadline: "01-31", description: "Quarterly federal tax return" },
   { name: "Form 940 (FUTA)", deadline: "01-31", description: "Annual federal unemployment tax" },
   { name: "W-2 / W-3 Filing", deadline: "01-31", description: "Employee wage statements to SSA" },
+  { name: "W-4 Renewal", deadline: "02-15", description: "Exempt W-4 expires annually — file new W-4 by Feb 15 or withholding reverts to default (IRC §3402(n))" },
   { name: "Form 1120 (Corporate Tax)", deadline: "04-15", description: "C-Corp federal income tax return" },
   { name: "Estimated Tax (Q1)", deadline: "04-15", description: "Corporate estimated tax payment" },
   { name: "Estimated Tax (Q2)", deadline: "06-15", description: "Corporate estimated tax payment" },
