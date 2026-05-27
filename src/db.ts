@@ -108,9 +108,26 @@ export async function initSchema(): Promise<void> {
       UNIQUE(month, year)
     )`);
 
-    await p.query(`CREATE INDEX IF NOT EXISTS idx_time_off_date ON accounting.time_off(date)`);
+    await p.query(`CREATE TABLE IF NOT EXISTS accounting.deposits (
+      id              SERIAL PRIMARY KEY,
+      form            TEXT NOT NULL,
+      tax_period      TEXT NOT NULL,
+      amount          NUMERIC(10,2) NOT NULL,
+      deposit_date    DATE NOT NULL,
+      eft_number      TEXT,
+      method          TEXT DEFAULT 'EFTPS',
+      status          TEXT DEFAULT 'confirmed' CHECK (status IN ('pending', 'confirmed', 'rejected')),
+      payroll_run_id  INTEGER REFERENCES accounting.payroll_runs(id),
+      note            TEXT DEFAULT '',
+      created_at      TIMESTAMPTZ DEFAULT now(),
+      created_by      TEXT DEFAULT 'neil',
+      UNIQUE(form, tax_period, eft_number)
+    )`);
 
-    console.log("PostgreSQL schema initialized (accounting.time_off, accounting.compliance_filings, accounting.payroll_runs)");
+    await p.query(`CREATE INDEX IF NOT EXISTS idx_time_off_date ON accounting.time_off(date)`);
+    await p.query(`CREATE INDEX IF NOT EXISTS idx_deposits_form_period ON accounting.deposits(form, tax_period)`);
+
+    console.log("PostgreSQL schema initialized (accounting.time_off, accounting.compliance_filings, accounting.payroll_runs, accounting.deposits)");
   } catch (err) {
     console.error("Failed to initialize database schema:", err instanceof Error ? err.message : err);
     throw err;
@@ -239,5 +256,66 @@ export async function dbPayrollInsert(data: {
   } catch (err) {
     console.error("Failed to persist payroll run:", err instanceof Error ? err.message : err);
     // Non-fatal — the PDF was already generated and uploaded
+  }
+}
+
+// ── Deposit Operations ──────────────────────────────────
+
+export async function dbDepositInsert(data: {
+  form: string;
+  taxPeriod: string;
+  amount: number;
+  depositDate: string;
+  eftNumber?: string;
+  method?: string;
+  status?: string;
+  payrollRunId?: number;
+  note?: string;
+  createdBy?: string;
+}): Promise<{ action: "inserted" | "updated" }> {
+  const p = getPool();
+  if (!p) throw new Error("Database not configured");
+  const result = await p.query(
+    `INSERT INTO accounting.deposits
+       (form, tax_period, amount, deposit_date, eft_number, method, status, payroll_run_id, note, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (form, tax_period, eft_number) DO UPDATE SET
+       amount = $3, deposit_date = $4, method = $6, status = $7,
+       payroll_run_id = $8, note = $9, created_by = $10
+     RETURNING (xmax = 0) AS is_insert`,
+    [
+      data.form, data.taxPeriod, data.amount, data.depositDate,
+      data.eftNumber || null, data.method || "EFTPS", data.status || "confirmed",
+      data.payrollRunId || null, data.note || "", data.createdBy || "neil",
+    ],
+  );
+  return { action: result.rows[0]?.is_insert ? "inserted" : "updated" };
+}
+
+export async function dbDepositGetByPeriod(
+  form: string,
+  taxPeriods: string[],
+): Promise<Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }>> {
+  const p = getPool();
+  if (!p) return new Map();
+  try {
+    const result = await p.query(
+      `SELECT tax_period, amount::float, deposit_date::text, COALESCE(eft_number, '') AS eft_number, status
+       FROM accounting.deposits
+       WHERE form = $1 AND tax_period = ANY($2)`,
+      [form, taxPeriods],
+    );
+    const map = new Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }>();
+    for (const row of result.rows) {
+      map.set(row.tax_period, {
+        amount: row.amount,
+        depositDate: row.deposit_date,
+        eftNumber: row.eft_number,
+        status: row.status,
+      });
+    }
+    return map;
+  } catch {
+    return new Map();
   }
 }

@@ -50,6 +50,9 @@ import {
   dbComplianceFiled,
   dbComplianceGetFiled,
   dbPayrollInsert,
+  dbDepositInsert,
+  dbDepositGetByPeriod,
+  getPool,
 } from "./db.js";
 import {
   generateAuthUrl,
@@ -323,6 +326,19 @@ const COMPLIANCE_CALENDAR = [
   { name: "Form 1099-NEC", deadline: "01-31", description: "Contractor payments >$600 (if any contractors paid)" },
   { name: "Modelo 720", deadline: "03-31", description: "Foreign asset declaration (Spain)" },
   { name: "Spain IRPF Declaration", deadline: "06-30", description: "Spanish personal income tax" },
+  // Monthly 941 deposits (due 15th of following month for monthly depositors)
+  { name: "941 Deposit (Jan)", deadline: "02-15", description: "Monthly payroll tax deposit for January wages via EFTPS" },
+  { name: "941 Deposit (Feb)", deadline: "03-15", description: "Monthly payroll tax deposit for February wages via EFTPS" },
+  { name: "941 Deposit (Mar)", deadline: "04-15", description: "Monthly payroll tax deposit for March wages via EFTPS" },
+  { name: "941 Deposit (Apr)", deadline: "05-15", description: "Monthly payroll tax deposit for April wages via EFTPS" },
+  { name: "941 Deposit (May)", deadline: "06-15", description: "Monthly payroll tax deposit for May wages via EFTPS" },
+  { name: "941 Deposit (Jun)", deadline: "07-15", description: "Monthly payroll tax deposit for June wages via EFTPS" },
+  { name: "941 Deposit (Jul)", deadline: "08-15", description: "Monthly payroll tax deposit for July wages via EFTPS" },
+  { name: "941 Deposit (Aug)", deadline: "09-15", description: "Monthly payroll tax deposit for August wages via EFTPS" },
+  { name: "941 Deposit (Sep)", deadline: "10-15", description: "Monthly payroll tax deposit for September wages via EFTPS" },
+  { name: "941 Deposit (Oct)", deadline: "11-15", description: "Monthly payroll tax deposit for October wages via EFTPS" },
+  { name: "941 Deposit (Nov)", deadline: "12-15", description: "Monthly payroll tax deposit for November wages via EFTPS" },
+  { name: "941 Deposit (Dec)", deadline: "01-15", description: "Monthly payroll tax deposit for December wages via EFTPS" },
 ];
 
 async function complianceCheck(): Promise<string> {
@@ -331,9 +347,20 @@ async function complianceCheck(): Promise<string> {
   const lines: string[] = ["## Compliance Deadlines", ""];
 
   // Get filed items — DB primary, brain-search fallback
+  // Also get deposited items from the deposits table
   let filedItems: Set<string>;
+  let depositedItems: Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }> = new Map();
   if (isDbAvailable()) {
     filedItems = await dbComplianceGetFiled([year, year + 1]);
+
+    // Check deposits table for 941 deposit deadlines
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const depositPeriods = monthNames.flatMap((m) => [`${m} ${year}`, `${m} ${year + 1}`]);
+    const deposits = await dbDepositGetByPeriod("941", depositPeriods);
+    for (const [period, info] of deposits) {
+      const monthName = period.split(" ")[0];
+      depositedItems.set(`941 Deposit (${monthName})`, info);
+    }
   } else {
     filedItems = new Set<string>();
     try {
@@ -368,7 +395,11 @@ async function complianceCheck(): Promise<string> {
 
       if (daysUntil >= -30 && daysUntil <= 90) {
         const entry = { name: item.name, deadline: `${y}-${item.deadline}`, daysUntil, description: item.description };
-        if (filedItems.has(item.name)) {
+        const depositInfo = depositedItems.get(item.name);
+        if (filedItems.has(item.name) || depositInfo) {
+          if (depositInfo) {
+            entry.description = `Deposited $${depositInfo.amount.toFixed(2)} on ${depositInfo.depositDate}${depositInfo.eftNumber ? ` (EFT ${depositInfo.eftNumber})` : ""}${depositInfo.status === "pending" ? " ⚠️ PENDING" : ""}`;
+          }
           completed.push(entry);
         } else if (daysUntil < 0) {
           overdue.push(entry);
@@ -462,6 +493,76 @@ Status: ${action === "inserted" ? "New filing recorded" : "Existing filing updat
 Stored in Second Brain (database not configured).`;
   } catch (err) {
     return `Error recording filing: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
+
+// ── Deposit Record ────────────────────────────────────────
+
+async function depositRecord(params: {
+  form: string;
+  taxPeriod: string;
+  amount: number;
+  depositDate: string;
+  eftNumber?: string;
+  method?: string;
+  status?: string;
+  note?: string;
+}): Promise<string> {
+  if (!isDbAvailable()) {
+    return "Error: Database not configured. Deposit tracking requires PostgreSQL.";
+  }
+
+  // Look up matching payroll_run_id if this is a 941 deposit
+  let payrollRunId: number | undefined;
+  if (params.form === "941") {
+    const monthMatch = params.taxPeriod.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})$/i);
+    if (monthMatch) {
+      const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+      const monthNum = monthNames.indexOf(monthMatch[1].toLowerCase()) + 1;
+      const yearNum = parseInt(monthMatch[2], 10);
+      try {
+        const p = getPool();
+        if (p) {
+          const result = await p.query(
+            `SELECT id FROM accounting.payroll_runs WHERE month = $1 AND year = $2`,
+            [monthNum, yearNum],
+          );
+          if (result.rows.length > 0) {
+            payrollRunId = result.rows[0].id;
+          }
+        }
+      } catch {
+        // Non-fatal — deposit is recorded without FK link
+      }
+    }
+  }
+
+  try {
+    const { action } = await dbDepositInsert({
+      form: params.form,
+      taxPeriod: params.taxPeriod,
+      amount: params.amount,
+      depositDate: params.depositDate,
+      eftNumber: params.eftNumber,
+      method: params.method,
+      status: params.status,
+      payrollRunId,
+      note: params.note,
+    });
+    return `## Deposit Recorded
+
+- **Form:** ${params.form}
+- **Tax Period:** ${params.taxPeriod}
+- **Amount:** $${params.amount.toFixed(2)}
+- **Deposit Date:** ${params.depositDate}
+- **EFT Number:** ${params.eftNumber || "—"}
+- **Method:** ${params.method || "EFTPS"}
+- **Status:** ${params.status || "confirmed"}
+- **Payroll Run ID:** ${payrollRunId ?? "—"}
+
+Status: ${action === "inserted" ? "New deposit recorded" : "Existing deposit updated"}.`;
+  } catch (err) {
+    return `Error recording deposit: ${err instanceof Error ? err.message : "unknown error"}`;
   }
 }
 
@@ -889,6 +990,7 @@ async function apiUsage(): Promise<string> {
 - **accounting-payroll-paystub** — Generate pay stub PDF + upload to NextCloud
 - **accounting-compliance-check** — Upcoming tax/compliance deadlines
 - **accounting-compliance-filed** — Record a compliance filing as complete
+- **accounting-deposit-record** — Record a tax deposit (EFTPS payment) with confirmation number
 - **accounting-api-usage** — This status page
 
 **Invoicing & Time Tracking:**
@@ -974,6 +1076,24 @@ function createServer(): McpServer {
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await complianceFiled(params)) }],
+    }),
+  );
+
+  server.tool(
+    "accounting-deposit-record",
+    "Record a tax deposit (EFTPS payment) with amount, date, and EFT confirmation number. Used to track payroll tax deposits for compliance verification.",
+    {
+      form: z.enum(["940", "941"]).describe("Tax form type"),
+      taxPeriod: z.string().describe("Tax period (e.g., 'Jan 2026', 'Q1 2026', 'Dec 2025')"),
+      amount: z.number().positive().describe("Deposit amount in USD"),
+      depositDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date deposit was made (YYYY-MM-DD)"),
+      eftNumber: z.string().optional().describe("EFTPS EFT Acknowledgment Number"),
+      method: z.string().default("EFTPS").describe("Payment method (EFTPS, check, wire)"),
+      status: z.enum(["pending", "confirmed", "rejected"]).default("confirmed").describe("Deposit status"),
+      note: z.string().default("").describe("Additional context"),
+    },
+    async (params) => ({
+      content: [{ type: "text" as const, text: sanitize(await depositRecord(params)) }],
     }),
   );
 
