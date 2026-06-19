@@ -74,6 +74,16 @@ import {
 const PORT = Number(process.env["PORT"]) || 8906;
 const SECRETS_DIR = process.env["SECRETS_DIR"] || "/secrets";
 
+// Client IPs allowed to reach /mcp through the reverse proxy (comma-separated).
+// Direct loopback connections (no X-Forwarded-For) are always allowed. When
+// unset, all proxied requests are rejected (the previous loopback-only behavior).
+const ALLOWED_IPS = new Set(
+  (process.env["MCP_ALLOWED_IPS"] || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
 // Company info — used in invoices and pay stubs
 const COMPANY: {
   name: string;
@@ -1363,12 +1373,16 @@ const httpServer = Bun.serve({
       }
     }
 
-    // ── MCP endpoint — loopback only (defense in depth) ──
+    // ── MCP endpoint — loopback + allowlisted client IPs (defense in depth) ──
     if (url.pathname === "/mcp") {
-      // Reject requests forwarded from external sources via reverse proxy
+      // Direct loopback (no XFF) is always allowed; proxied requests must
+      // originate from an allowlisted client IP.
       const forwarded = req.headers.get("x-forwarded-for");
       if (forwarded) {
-        return new Response("Forbidden", { status: 403 });
+        const clientIp = forwarded.split(",")[0]?.trim() ?? "";
+        if (!ALLOWED_IPS.has(clientIp)) {
+          return new Response("Forbidden", { status: 403 });
+        }
       }
 
       if (isRateLimited()) {
