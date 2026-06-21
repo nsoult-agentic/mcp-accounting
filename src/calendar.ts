@@ -70,14 +70,16 @@ export function calculateWorkCalendar(
  * A new range starts when there's a gap of >2 days (i.e., not just a weekend).
  */
 function groupIntoWeekRanges(dates: Date[]): string[] {
-  if (dates.length === 0) return [];
+  const first = dates[0];
+  if (first === undefined) return [];
 
   const ranges: string[] = [];
-  let rangeStart = dates[0];
-  let prev = dates[0];
+  let rangeStart = first;
+  let prev = first;
 
   for (let i = 1; i < dates.length; i++) {
     const curr = dates[i];
+    if (curr === undefined) continue;
     const diffDays = (curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24);
 
     // Any gap > 1 calendar day means a new range (weekends = 3 days, mid-week day off = 2 days)

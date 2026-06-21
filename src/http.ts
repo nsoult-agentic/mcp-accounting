@@ -397,6 +397,7 @@ async function complianceCheck(): Promise<string> {
 
   for (const item of COMPLIANCE_CALENDAR) {
     const [mm, dd] = item.deadline.split("-").map(Number);
+    if (mm === undefined || dd === undefined) continue;
     for (const y of [year, year + 1]) {
       const deadlineDate = new Date(y, mm - 1, dd);
       const diffMs = deadlineDate.getTime() - now.getTime();
@@ -540,7 +541,9 @@ async function depositRecord(params: {
     const monthMatch = params.taxPeriod.match(
       /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})$/i,
     );
-    if (monthMatch) {
+    const monthAbbr = monthMatch?.[1];
+    const yearStr = monthMatch?.[2];
+    if (monthAbbr !== undefined && yearStr !== undefined) {
       const monthNames = [
         "jan",
         "feb",
@@ -555,8 +558,8 @@ async function depositRecord(params: {
         "nov",
         "dec",
       ];
-      const monthNum = monthNames.indexOf(monthMatch[1].toLowerCase()) + 1;
-      const yearNum = parseInt(monthMatch[2], 10);
+      const monthNum = monthNames.indexOf(monthAbbr.toLowerCase()) + 1;
+      const yearNum = parseInt(yearStr, 10);
       try {
         const p = getPool();
         if (p) {
@@ -610,6 +613,9 @@ const TIMEOFF_PREFIX = "TIMEOFF";
 async function timeOffLog(params: { date: string; type: string; note: string }): Promise<string> {
   // RT-008: Validate the date is a weekday
   const [y, m, d] = params.date.split("-").map(Number);
+  if (y === undefined || m === undefined || d === undefined) {
+    return `Error: ${params.date} is not a valid date (expected YYYY-MM-DD).`;
+  }
   const dateObj = new Date(y, m - 1, d);
   const dow = dateObj.getDay();
   if (dow === 0 || dow === 6) {
@@ -668,7 +674,11 @@ async function timeOffList(params: {
         const match = line.match(/TIMEOFF:(\d{4}-\d{2}-\d{2}):(\w+)/);
         if (match) {
           const [, date, type] = match;
-          if (date.startsWith(`${params.year}-${monthStr}`)) {
+          if (
+            date !== undefined &&
+            type !== undefined &&
+            date.startsWith(`${params.year}-${monthStr}`)
+          ) {
             const noteMatch = line.match(/Note:\s*([^.]+)/);
             daysOff.push({ date, type, note: noteMatch?.[1]?.trim() });
           }
@@ -720,7 +730,7 @@ async function timeOffDelete(params: { date: string }): Promise<string> {
       return `No time-off entry found for ${params.date}.`;
     }
     const [y, m] = params.date.split("-").map(Number);
-    const mn = monthName(m);
+    const mn = m === undefined ? "Unknown" : monthName(m);
     return `## Time Off Deleted\n\n- **Date:** ${deleted.date}\n- **Type:** ${deleted.type}\n- **Note:** ${deleted.note || "—"}\n\nRemoved from database.\n\n*Note: If an invoice for ${mn} ${y} was already generated, it may need to be regenerated to reflect the updated work days.*`;
   } catch (err) {
     return `Error deleting time off: ${err instanceof Error ? err.message : "unknown error"}`;
@@ -750,8 +760,12 @@ async function fetchLogo(): Promise<Buffer | undefined> {
 }
 
 function addDays(dateStr: string, days: number): string {
-  // Parse MM/DD/YYYY
+  // Parse MM/DD/YYYY — dateStr is always produced internally in this fixed format,
+  // so all three parts are present; guard returns the input unchanged if that ever breaks.
   const [mm, dd, yyyy] = dateStr.split("/").map(Number);
+  if (mm === undefined || dd === undefined || yyyy === undefined) {
+    return dateStr;
+  }
   const d = new Date(yyyy, mm - 1, dd + days);
   return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
 }
@@ -764,7 +778,7 @@ async function detectNextInvoiceNumber(year: number): Promise<number> {
     const regex = /Invoice\s+(\d+)/g;
     let m: RegExpExecArray | null;
     while ((m = regex.exec(listing)) !== null) {
-      numbers.push(parseInt(m[1], 10));
+      if (m[1] !== undefined) numbers.push(parseInt(m[1], 10));
     }
     if (numbers.length > 0) {
       return Math.max(...numbers) + 1;
@@ -779,7 +793,7 @@ async function detectNextInvoiceNumber(year: number): Promise<number> {
     const regex = /Invoice\s+(\d+)/g;
     let m: RegExpExecArray | null;
     while ((m = regex.exec(listing)) !== null) {
-      numbers.push(parseInt(m[1], 10));
+      if (m[1] !== undefined) numbers.push(parseInt(m[1], 10));
     }
     if (numbers.length > 0) {
       return Math.max(...numbers) + 1;
@@ -1444,8 +1458,10 @@ const requestTimestamps: number[] = [];
 
 function isRateLimited(): boolean {
   const now = Date.now();
-  while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_WINDOW_MS) {
+  let oldest = requestTimestamps[0];
+  while (oldest !== undefined && oldest < now - RATE_WINDOW_MS) {
     requestTimestamps.shift();
+    oldest = requestTimestamps[0];
   }
   if (requestTimestamps.length >= RATE_LIMIT) return true;
   requestTimestamps.push(now);
