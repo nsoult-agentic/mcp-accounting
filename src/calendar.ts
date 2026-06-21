@@ -116,10 +116,7 @@ function formatISO(d: Date): string {
  * Generate the invoice description string from week ranges.
  * Matches existing format: "{Month} Hours Worked\n{range1}\n{range2}\n..."
  */
-export function formatInvoiceDescription(
-  monthName: string,
-  weekRanges: string[],
-): string {
+export function formatInvoiceDescription(monthName: string, weekRanges: string[]): string {
   return `${monthName} Hours Worked\n${weekRanges.join("\n")}`;
 }
 
@@ -128,8 +125,18 @@ export function formatInvoiceDescription(
  */
 export function monthName(month: number): string {
   const names = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
   ];
   return names[month - 1] || "Unknown";
 }

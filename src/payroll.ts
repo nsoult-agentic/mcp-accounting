@@ -9,7 +9,7 @@ export const TAX_CONFIG = {
   year: 2026,
   standardDeduction: 16_100,
   federalBrackets: [
-    { min: 0, max: 12_400, rate: 0.10 },
+    { min: 0, max: 12_400, rate: 0.1 },
     { min: 12_400, max: 50_400, rate: 0.12 },
     { min: 50_400, max: 105_700, rate: 0.22 },
     { min: 105_700, max: 201_775, rate: 0.24 },
@@ -103,7 +103,8 @@ export function calculatePayroll(monthlySalary: number, month: number): PayrollR
     employerSocialSecurity: Math.round(employerSS * 100) / 100,
     employerMedicare: Math.round(employerMedicare * 100) / 100,
     employerFUTA: Math.round(employerFUTA * 100) / 100,
-    totalEmployerCost: Math.round((monthlySalary + employerSS + employerMedicare + employerFUTA) * 100) / 100,
+    totalEmployerCost:
+      Math.round((monthlySalary + employerSS + employerMedicare + employerFUTA) * 100) / 100,
     ytdGross,
   };
 }

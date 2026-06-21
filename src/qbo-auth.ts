@@ -21,8 +21,7 @@ const TOKENS_FILE = resolve(TOKENS_DIR, "qbo-tokens.json");
 const TOKENS_TMP = resolve(TOKENS_DIR, "qbo-tokens.json.tmp");
 
 const INTUIT_AUTH_URL = "https://appcenter.intuit.com/connect/oauth2";
-const INTUIT_TOKEN_URL =
-  "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+const INTUIT_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
 const QBO_SCOPE = "com.intuit.quickbooks.accounting";
 
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -100,9 +99,7 @@ async function postTokenEndpoint(
   clientId: string,
   clientSecret: string,
 ): Promise<IntuitTokenResponse> {
-  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString(
-    "base64",
-  );
+  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
   const res = await fetch(INTUIT_TOKEN_URL, {
     method: "POST",
@@ -118,9 +115,16 @@ async function postTokenEndpoint(
   if (!res.ok) {
     const text = await res.text();
     // Sanitize — Intuit error responses could echo sensitive data
-    const safe = text.slice(0, 200)
-      .replace(/["']?access_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "access_token=[REDACTED]")
-      .replace(/["']?refresh_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "refresh_token=[REDACTED]");
+    const safe = text
+      .slice(0, 200)
+      .replace(
+        /["']?access_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi,
+        "access_token=[REDACTED]",
+      )
+      .replace(
+        /["']?refresh_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi,
+        "refresh_token=[REDACTED]",
+      );
     throw new Error(`Intuit token endpoint returned ${res.status}: ${safe}`);
   }
 
@@ -155,10 +159,7 @@ export async function exchangeCode(
   console.log("QBO OAuth: tokens obtained and saved successfully");
 }
 
-export async function refreshTokens(
-  clientId: string,
-  clientSecret: string,
-): Promise<StoredTokens> {
+export async function refreshTokens(clientId: string, clientSecret: string): Promise<StoredTokens> {
   const current = readTokens();
   if (!current) {
     throw new Error("No stored tokens to refresh");

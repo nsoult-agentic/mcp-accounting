@@ -65,7 +65,6 @@ import {
   isRefreshTokenExpired,
 } from "./qbo-auth.js";
 import {
-  companyInfo as qboCompanyInfo,
   profitAndLoss as qboProfitAndLoss,
   listInvoices as qboListInvoices,
 } from "./qbo-client.js";
@@ -159,16 +158,24 @@ function getQBOCredentials(): QBOCredentials | null {
 // ── Sanitize Output ────────────────────────────────────────
 
 function sanitize(s: string): string {
-  return s
-    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
-    .replace(/Basic\s+\S+/gi, "Basic [REDACTED]")
-    .replace(/\b(sk-|pk_|rk_|whsec_|xox[bpas]-)[A-Za-z0-9_-]{20,}/g, "[REDACTED]")
-    .replace(/["']?access_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "access_token=[REDACTED]")
-    .replace(/["']?refresh_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi, "refresh_token=[REDACTED]")
-    .replace(/http:\/\/host\.docker\.internal[^\s]*/g, "[internal]")
-    // PII sanitizer: catch any SSN (XXX-XX-XXXX) or EIN (XX-XXXXXXX) patterns
-    .replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[SSN-REDACTED]")
-    .replace(/\b\d{2}-\d{7}\b/g, "[EIN-REDACTED]");
+  return (
+    s
+      .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+      .replace(/Basic\s+\S+/gi, "Basic [REDACTED]")
+      .replace(/\b(sk-|pk_|rk_|whsec_|xox[bpas]-)[A-Za-z0-9_-]{20,}/g, "[REDACTED]")
+      .replace(
+        /["']?access_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi,
+        "access_token=[REDACTED]",
+      )
+      .replace(
+        /["']?refresh_token["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{20,}["']?/gi,
+        "refresh_token=[REDACTED]",
+      )
+      .replace(/http:\/\/host\.docker\.internal[^\s]*/g, "[internal]")
+      // PII sanitizer: catch any SSN (XXX-XX-XXXX) or EIN (XX-XXXXXXX) patterns
+      .replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[SSN-REDACTED]")
+      .replace(/\b\d{2}-\d{7}\b/g, "[EIN-REDACTED]")
+  );
 }
 
 // ── Tax Configuration (2026) ───────────────────────────────
@@ -223,31 +230,104 @@ const COMPLIANCE_CALENDAR = [
   { name: "Form 941 (Q4)", deadline: "01-31", description: "Quarterly federal tax return" },
   { name: "Form 940 (FUTA)", deadline: "01-31", description: "Annual federal unemployment tax" },
   { name: "W-2 / W-3 Filing", deadline: "01-31", description: "Employee wage statements to SSA" },
-  { name: "W-4 Renewal", deadline: "02-15", description: "Exempt W-4 expires annually — file new W-4 by Feb 15 or withholding reverts to default (IRC §3402(n))" },
-  { name: "Form 1120 (Corporate Tax)", deadline: "04-15", description: "C-Corp federal income tax return" },
+  {
+    name: "W-4 Renewal",
+    deadline: "02-15",
+    description:
+      "Exempt W-4 expires annually — file new W-4 by Feb 15 or withholding reverts to default (IRC §3402(n))",
+  },
+  {
+    name: "Form 1120 (Corporate Tax)",
+    deadline: "04-15",
+    description: "C-Corp federal income tax return",
+  },
   { name: "Estimated Tax (Q1)", deadline: "04-15", description: "Corporate estimated tax payment" },
   { name: "Estimated Tax (Q2)", deadline: "06-15", description: "Corporate estimated tax payment" },
   { name: "Estimated Tax (Q3)", deadline: "09-15", description: "Corporate estimated tax payment" },
   { name: "Estimated Tax (Q4)", deadline: "12-15", description: "Corporate estimated tax payment" },
-  { name: "Delaware Franchise Tax", deadline: "03-01", description: "Annual report + franchise tax" },
-  { name: "Delaware Registered Agent", deadline: "06-01", description: "Annual registered agent renewal (check exact date)" },
-  { name: "FinCEN BOI Report", deadline: "01-01", description: "Beneficial Ownership Information annual update (if applicable)" },
-  { name: "Form 1099-NEC", deadline: "01-31", description: "Contractor payments >$600 (if any contractors paid)" },
+  {
+    name: "Delaware Franchise Tax",
+    deadline: "03-01",
+    description: "Annual report + franchise tax",
+  },
+  {
+    name: "Delaware Registered Agent",
+    deadline: "06-01",
+    description: "Annual registered agent renewal (check exact date)",
+  },
+  {
+    name: "FinCEN BOI Report",
+    deadline: "01-01",
+    description: "Beneficial Ownership Information annual update (if applicable)",
+  },
+  {
+    name: "Form 1099-NEC",
+    deadline: "01-31",
+    description: "Contractor payments >$600 (if any contractors paid)",
+  },
   { name: "Modelo 720", deadline: "03-31", description: "Foreign asset declaration (Spain)" },
   { name: "Spain IRPF Declaration", deadline: "06-30", description: "Spanish personal income tax" },
   // Monthly 941 deposits (due 15th of following month for monthly depositors)
-  { name: "941 Deposit (Jan)", deadline: "02-15", description: "Monthly payroll tax deposit for January wages via EFTPS" },
-  { name: "941 Deposit (Feb)", deadline: "03-15", description: "Monthly payroll tax deposit for February wages via EFTPS" },
-  { name: "941 Deposit (Mar)", deadline: "04-15", description: "Monthly payroll tax deposit for March wages via EFTPS" },
-  { name: "941 Deposit (Apr)", deadline: "05-15", description: "Monthly payroll tax deposit for April wages via EFTPS" },
-  { name: "941 Deposit (May)", deadline: "06-15", description: "Monthly payroll tax deposit for May wages via EFTPS" },
-  { name: "941 Deposit (Jun)", deadline: "07-15", description: "Monthly payroll tax deposit for June wages via EFTPS" },
-  { name: "941 Deposit (Jul)", deadline: "08-15", description: "Monthly payroll tax deposit for July wages via EFTPS" },
-  { name: "941 Deposit (Aug)", deadline: "09-15", description: "Monthly payroll tax deposit for August wages via EFTPS" },
-  { name: "941 Deposit (Sep)", deadline: "10-15", description: "Monthly payroll tax deposit for September wages via EFTPS" },
-  { name: "941 Deposit (Oct)", deadline: "11-15", description: "Monthly payroll tax deposit for October wages via EFTPS" },
-  { name: "941 Deposit (Nov)", deadline: "12-15", description: "Monthly payroll tax deposit for November wages via EFTPS" },
-  { name: "941 Deposit (Dec)", deadline: "01-15", description: "Monthly payroll tax deposit for December wages via EFTPS" },
+  {
+    name: "941 Deposit (Jan)",
+    deadline: "02-15",
+    description: "Monthly payroll tax deposit for January wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Feb)",
+    deadline: "03-15",
+    description: "Monthly payroll tax deposit for February wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Mar)",
+    deadline: "04-15",
+    description: "Monthly payroll tax deposit for March wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Apr)",
+    deadline: "05-15",
+    description: "Monthly payroll tax deposit for April wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (May)",
+    deadline: "06-15",
+    description: "Monthly payroll tax deposit for May wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Jun)",
+    deadline: "07-15",
+    description: "Monthly payroll tax deposit for June wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Jul)",
+    deadline: "08-15",
+    description: "Monthly payroll tax deposit for July wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Aug)",
+    deadline: "09-15",
+    description: "Monthly payroll tax deposit for August wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Sep)",
+    deadline: "10-15",
+    description: "Monthly payroll tax deposit for September wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Oct)",
+    deadline: "11-15",
+    description: "Monthly payroll tax deposit for October wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Nov)",
+    deadline: "12-15",
+    description: "Monthly payroll tax deposit for November wages via EFTPS",
+  },
+  {
+    name: "941 Deposit (Dec)",
+    deadline: "01-15",
+    description: "Monthly payroll tax deposit for December wages via EFTPS",
+  },
 ];
 
 async function complianceCheck(): Promise<string> {
@@ -258,12 +338,28 @@ async function complianceCheck(): Promise<string> {
   // Get filed items — DB primary, brain-search fallback
   // Also get deposited items from the deposits table
   let filedItems: Set<string>;
-  let depositedItems: Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }> = new Map();
+  const depositedItems: Map<
+    string,
+    { amount: number; depositDate: string; eftNumber: string; status: string }
+  > = new Map();
   if (isDbAvailable()) {
     filedItems = await dbComplianceGetFiled([year, year + 1]);
 
     // Check deposits table for 941 deposit deadlines
-    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const monthNames = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
     const depositPeriods = monthNames.flatMap((m) => [`${m} ${year}`, `${m} ${year + 1}`]);
     const deposits = await dbDepositGetByPeriod("941", depositPeriods);
     for (const [period, info] of deposits) {
@@ -280,8 +376,12 @@ async function complianceCheck(): Promise<string> {
       });
       const resultLower = results.toLowerCase();
       for (const item of COMPLIANCE_CALENDAR) {
-        const coreMatch = item.name.match(/(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i);
-        const coreId = coreMatch ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase() : item.name.toLowerCase();
+        const coreMatch = item.name.match(
+          /(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i,
+        );
+        const coreId = coreMatch
+          ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase()
+          : item.name.toLowerCase();
         if (resultLower.includes(coreId) && resultLower.includes("filed")) {
           filedItems.add(item.name);
         }
@@ -303,7 +403,12 @@ async function complianceCheck(): Promise<string> {
       const daysUntil = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
 
       if (daysUntil >= -30 && daysUntil <= 90) {
-        const entry = { name: item.name, deadline: `${y}-${item.deadline}`, daysUntil, description: item.description };
+        const entry = {
+          name: item.name,
+          deadline: `${y}-${item.deadline}`,
+          daysUntil,
+          description: item.description,
+        };
         const depositInfo = depositedItems.get(item.name);
         if (filedItems.has(item.name) || depositInfo) {
           if (depositInfo) {
@@ -322,7 +427,9 @@ async function complianceCheck(): Promise<string> {
   if (overdue.length > 0) {
     lines.push("### ⚠️ Overdue");
     for (const item of overdue.sort((a, b) => a.daysUntil - b.daysUntil)) {
-      lines.push(`- **${item.name}** — ${item.deadline} (${Math.abs(item.daysUntil)} days overdue) — ${item.description}`);
+      lines.push(
+        `- **${item.name}** — ${item.deadline} (${Math.abs(item.daysUntil)} days overdue) — ${item.description}`,
+      );
     }
     lines.push("");
   }
@@ -331,7 +438,9 @@ async function complianceCheck(): Promise<string> {
     lines.push("### Upcoming (next 90 days)");
     for (const item of upcoming.sort((a, b) => a.daysUntil - b.daysUntil)) {
       const urgency = item.daysUntil <= 14 ? "🔴" : item.daysUntil <= 30 ? "🟡" : "🟢";
-      lines.push(`- ${urgency} **${item.name}** — ${item.deadline} (${item.daysUntil} days) — ${item.description}`);
+      lines.push(
+        `- ${urgency} **${item.name}** — ${item.deadline} (${item.daysUntil} days) — ${item.description}`,
+      );
     }
     lines.push("");
   }
@@ -371,7 +480,11 @@ async function complianceFiled(params: {
   if (isDbAvailable()) {
     try {
       const { action } = await dbComplianceFiled(
-        params.name, params.taxYear, params.filedDate, params.method, params.note,
+        params.name,
+        params.taxYear,
+        params.filedDate,
+        params.method,
+        params.note,
       );
       return `## Compliance Filing Recorded
 
@@ -424,9 +537,24 @@ async function depositRecord(params: {
   // Look up matching payroll_run_id if this is a 941 deposit
   let payrollRunId: number | undefined;
   if (params.form === "941") {
-    const monthMatch = params.taxPeriod.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})$/i);
+    const monthMatch = params.taxPeriod.match(
+      /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})$/i,
+    );
     if (monthMatch) {
-      const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+      const monthNames = [
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "may",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "oct",
+        "nov",
+        "dec",
+      ];
       const monthNum = monthNames.indexOf(monthMatch[1].toLowerCase()) + 1;
       const yearNum = parseInt(monthMatch[2], 10);
       try {
@@ -479,11 +607,7 @@ Status: ${action === "inserted" ? "New deposit recorded" : "Existing deposit upd
 
 const TIMEOFF_PREFIX = "TIMEOFF";
 
-async function timeOffLog(params: {
-  date: string;
-  type: string;
-  note: string;
-}): Promise<string> {
+async function timeOffLog(params: { date: string; type: string; note: string }): Promise<string> {
   // RT-008: Validate the date is a weekday
   const [y, m, d] = params.date.split("-").map(Number);
   const dateObj = new Date(y, m - 1, d);
@@ -493,7 +617,10 @@ async function timeOffLog(params: {
   }
 
   // RT-006: Sanitize note — strip newlines, limit length
-  const cleanNote = (params.note || "").replace(/[\n\r]/g, " ").slice(0, 200).trim();
+  const cleanNote = (params.note || "")
+    .replace(/[\n\r]/g, " ")
+    .slice(0, 200)
+    .trim();
 
   try {
     if (isDbAvailable()) {
@@ -565,7 +692,8 @@ async function timeOffList(params: {
   const mn = monthName(params.month);
   let markdown = `## Time Off — ${mn} ${params.year}\n\n`;
   if (dataUnavailable) {
-    markdown += "⚠️ **Warning: Data store is unavailable.** Time-off data could not be retrieved. Invoice generation will assume zero days off — verify before sending.\n\n";
+    markdown +=
+      "⚠️ **Warning: Data store is unavailable.** Time-off data could not be retrieved. Invoice generation will assume zero days off — verify before sending.\n\n";
   }
   if (daysOff.length === 0 && !dataUnavailable) {
     markdown += "No time off recorded for this month.";
@@ -670,7 +798,10 @@ async function invoiceGenerate(params: {
   dryRun: boolean;
 }): Promise<string> {
   // 1. Get time off for the month
-  const { daysOff, brainUnavailable } = await timeOffList({ month: params.month, year: params.year });
+  const { daysOff, brainUnavailable } = await timeOffList({
+    month: params.month,
+    year: params.year,
+  });
 
   // 2. Calculate work calendar
   const calendar = calculateWorkCalendar(params.year, params.month, daysOff, HOURS_PER_DAY);
@@ -680,7 +811,7 @@ async function invoiceGenerate(params: {
   }
 
   // 3. Determine invoice number
-  const invoiceNumber = params.invoiceNumber ?? await detectNextInvoiceNumber(params.year);
+  const invoiceNumber = params.invoiceNumber ?? (await detectNextInvoiceNumber(params.year));
 
   // 4. Build dates
   const mn = monthName(params.month);
@@ -740,7 +871,10 @@ async function invoiceGenerate(params: {
   ];
 
   if (brainUnavailable) {
-    summary.push(``, `⚠️ **Warning:** Second Brain was unavailable — time-off data could not be verified. This invoice assumes zero days off. **Do not send without verifying.**`);
+    summary.push(
+      ``,
+      `⚠️ **Warning:** Second Brain was unavailable — time-off data could not be verified. This invoice assumes zero days off. **Do not send without verifying.**`,
+    );
   }
 
   if (daysOff.length > 0) {
@@ -758,11 +892,19 @@ async function invoiceGenerate(params: {
       await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
       summary.push(``, `**Uploaded to:** ${uploadPath}`);
     } catch (err) {
-      summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
-      summary.push(`PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but could not be uploaded.`);
+      summary.push(
+        ``,
+        `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`,
+      );
+      summary.push(
+        `PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but could not be uploaded.`,
+      );
     }
   } else {
-    summary.push(``, `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`);
+    summary.push(
+      ``,
+      `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`,
+    );
   }
 
   return summary.join("\n");
@@ -809,7 +951,8 @@ async function paystubGenerate(params: {
       { label: "Social Security (6.2%)", amount: ssTax },
       { label: "Medicare (1.45%)", amount: medTax },
     ],
-    adjustments: params.adjustments && params.adjustments.length > 0 ? params.adjustments : undefined,
+    adjustments:
+      params.adjustments && params.adjustments.length > 0 ? params.adjustments : undefined,
     netPay,
     ytdGross: params.ytdGross ?? params.monthlySalary * params.month,
     employerCosts: [
@@ -834,7 +977,11 @@ async function paystubGenerate(params: {
     `| Employee | Neilson Soult |`,
     `| Gross Pay | $${params.monthlySalary.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
     `| Total Deductions | -$${totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-    ...(totalAdjustments > 0 ? [`| Adjustments | -$${totalAdjustments.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`] : []),
+    ...(totalAdjustments > 0
+      ? [
+          `| Adjustments | -$${totalAdjustments.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
+        ]
+      : []),
     `| **Net Pay** | **$${netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
     `| YTD Gross | $${(params.ytdGross ?? params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
   ];
@@ -849,11 +996,17 @@ async function paystubGenerate(params: {
       await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
       summary.push(``, `**Uploaded to:** ${uploadPath}`);
     } catch (err) {
-      summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
+      summary.push(
+        ``,
+        `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`,
+      );
       uploadPath = undefined;
     }
   } else {
-    summary.push(``, `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`);
+    summary.push(
+      ``,
+      `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`,
+    );
   }
 
   // 6. Persist payroll run to database (non-fatal if it fails)
@@ -977,10 +1130,18 @@ function createServer(): McpServer {
     "accounting-compliance-filed",
     "Record that a compliance deadline has been met (tax filed, payment made). Removes it from the overdue/upcoming list.",
     {
-      name: z.enum(COMPLIANCE_NAMES as [string, ...string[]]).describe("Deadline name from compliance calendar"),
+      name: z
+        .enum(COMPLIANCE_NAMES as [string, ...string[]])
+        .describe("Deadline name from compliance calendar"),
       taxYear: z.number().int().min(2020).max(2030).describe("Tax year this filing covers (YYYY)"),
-      filedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date filed/paid (YYYY-MM-DD)"),
-      method: z.string().default("").describe("How it was filed (e.g., 'EFTPS auto-pay', 'mailed to IRS', 'via CPA')"),
+      filedDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Date filed/paid (YYYY-MM-DD)"),
+      method: z
+        .string()
+        .default("")
+        .describe("How it was filed (e.g., 'EFTPS auto-pay', 'mailed to IRS', 'via CPA')"),
       note: z.string().default("").describe("Additional context"),
     },
     async (params) => ({
@@ -995,10 +1156,16 @@ function createServer(): McpServer {
       form: z.enum(["940", "941"]).describe("Tax form type"),
       taxPeriod: z.string().describe("Tax period (e.g., 'Jan 2026', 'Q1 2026', 'Dec 2025')"),
       amount: z.number().positive().describe("Deposit amount in USD"),
-      depositDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date deposit was made (YYYY-MM-DD)"),
+      depositDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Date deposit was made (YYYY-MM-DD)"),
       eftNumber: z.string().optional().describe("EFTPS EFT Acknowledgment Number"),
       method: z.string().default("EFTPS").describe("Payment method (EFTPS, check, wire)"),
-      status: z.enum(["pending", "confirmed", "rejected"]).default("confirmed").describe("Deposit status"),
+      status: z
+        .enum(["pending", "confirmed", "rejected"])
+        .default("confirmed")
+        .describe("Deposit status"),
       note: z.string().default("").describe("Additional context"),
     },
     async (params) => ({
@@ -1021,7 +1188,10 @@ function createServer(): McpServer {
     "accounting-time-off-log",
     "Record a day off (sick, vacation, holiday). Used by invoice generator to calculate work days.",
     {
-      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date (YYYY-MM-DD)"),
+      date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Date (YYYY-MM-DD)"),
       type: z.enum(["sick", "vacation", "holiday", "other"]).describe("Type of time off"),
       note: z.string().default("").describe("Optional note (e.g., 'Good Friday trip')"),
     },
@@ -1046,7 +1216,10 @@ function createServer(): McpServer {
     "accounting-time-off-delete",
     "Delete a time-off entry by date. Use when scheduled time off is cancelled.",
     {
-      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Date to delete (YYYY-MM-DD)"),
+      date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Date to delete (YYYY-MM-DD)"),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await timeOffDelete(params)) }],
@@ -1059,9 +1232,16 @@ function createServer(): McpServer {
     {
       month: z.number().int().min(1).max(12).describe("Month to invoice (1-12)"),
       year: z.number().int().default(2026).describe("Year"),
-      invoiceNumber: z.number().int().optional().describe("Invoice number (auto-detects from NextCloud if omitted)"),
+      invoiceNumber: z
+        .number()
+        .int()
+        .optional()
+        .describe("Invoice number (auto-detects from NextCloud if omitted)"),
       client: z.string().default("Crexi").describe("Client name (default: Crexi)"),
-      dryRun: z.boolean().default(false).describe("If true, generate PDF but don't upload to NextCloud"),
+      dryRun: z
+        .boolean()
+        .default(false)
+        .describe("If true, generate PDF but don't upload to NextCloud"),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await invoiceGenerate(params)) }],
@@ -1076,14 +1256,39 @@ function createServer(): McpServer {
       year: z.number().int().min(2020).max(2030).default(2026).describe("Year"),
       monthlySalary: z.number().positive().describe("Monthly gross salary in USD"),
       dryRun: z.boolean().default(false).describe("If true, generate PDF but don't upload"),
-      federalWithholding: z.number().nonnegative().optional().describe("Override: actual federal tax withheld (skip calculation)"),
-      socialSecurity: z.number().nonnegative().optional().describe("Override: actual SS tax withheld (skip calculation)"),
-      medicare: z.number().nonnegative().optional().describe("Override: actual Medicare tax withheld (skip calculation)"),
-      adjustments: z.array(z.object({
-        label: z.string().describe("Adjustment description (e.g., 'Federal Tax Withholding Jan')"),
-        amount: z.number().nonnegative().describe("Adjustment amount"),
-      })).optional().describe("Additional adjustment line items (e.g., catch-up withholding corrections)"),
-      ytdGross: z.number().nonnegative().optional().describe("Override: actual YTD gross (for mid-year salary changes). If omitted, calculated as monthlySalary × month."),
+      federalWithholding: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Override: actual federal tax withheld (skip calculation)"),
+      socialSecurity: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Override: actual SS tax withheld (skip calculation)"),
+      medicare: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Override: actual Medicare tax withheld (skip calculation)"),
+      adjustments: z
+        .array(
+          z.object({
+            label: z
+              .string()
+              .describe("Adjustment description (e.g., 'Federal Tax Withholding Jan')"),
+            amount: z.number().nonnegative().describe("Adjustment amount"),
+          }),
+        )
+        .optional()
+        .describe("Additional adjustment line items (e.g., catch-up withholding corrections)"),
+      ytdGross: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe(
+          "Override: actual YTD gross (for mid-year salary changes). If omitted, calculated as monthlySalary × month.",
+        ),
     },
     async (params) => ({
       content: [{ type: "text" as const, text: sanitize(await paystubGenerate(params)) }],
@@ -1100,18 +1305,22 @@ function createServer(): McpServer {
       const creds = getQBOCredentials();
       if (!creds?.clientId || !creds?.redirectUri) {
         return {
-          content: [{
-            type: "text" as const,
-            text: "Error: QBO_CLIENT_ID or QBO_REDIRECT_URI not configured in quickbooks.env",
-          }],
+          content: [
+            {
+              type: "text" as const,
+              text: "Error: QBO_CLIENT_ID or QBO_REDIRECT_URI not configured in quickbooks.env",
+            },
+          ],
         };
       }
       const { url, expiresIn } = generateAuthUrl(creds.clientId, creds.redirectUri);
       return {
-        content: [{
-          type: "text" as const,
-          text: `## QBO Authorization\n\nOpen this URL in your browser:\n\n${url}\n\nCallback window expires in ${expiresIn}.`,
-        }],
+        content: [
+          {
+            type: "text" as const,
+            text: `## QBO Authorization\n\nOpen this URL in your browser:\n\n${url}\n\nCallback window expires in ${expiresIn}.`,
+          },
+        ],
       };
     },
   );
@@ -1144,19 +1353,40 @@ function createServer(): McpServer {
     "accounting-invoice-status",
     "Read invoice data from QuickBooks Online for a date range.",
     {
-      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Start date (YYYY-MM-DD)"),
-      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("End date (YYYY-MM-DD)"),
+      startDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Start date (YYYY-MM-DD)"),
+      endDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("End date (YYYY-MM-DD)"),
     },
     async (params) => {
       const creds = getQBOCredentials();
       if (!creds?.clientId || !creds?.clientSecret) {
-        return { content: [{ type: "text" as const, text: "Error: QBO credentials not configured" }] };
+        return {
+          content: [{ type: "text" as const, text: "Error: QBO credentials not configured" }],
+        };
       }
       try {
-        const data = await qboListInvoices({ clientId: creds.clientId, clientSecret: creds.clientSecret }, params.startDate, params.endDate);
-        return { content: [{ type: "text" as const, text: sanitize(JSON.stringify(data, null, 2)) }] };
+        const data = await qboListInvoices(
+          { clientId: creds.clientId, clientSecret: creds.clientSecret },
+          params.startDate,
+          params.endDate,
+        );
+        return {
+          content: [{ type: "text" as const, text: sanitize(JSON.stringify(data, null, 2)) }],
+        };
       } catch (err) {
-        return { content: [{ type: "text" as const, text: sanitize(`Error: ${err instanceof Error ? err.message : "unknown"}`) }] };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: sanitize(`Error: ${err instanceof Error ? err.message : "unknown"}`),
+            },
+          ],
+        };
       }
     },
   );
@@ -1165,19 +1395,40 @@ function createServer(): McpServer {
     "accounting-bookkeeping-summary",
     "Get Profit & Loss report from QuickBooks Online for a date range.",
     {
-      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Start date (YYYY-MM-DD)"),
-      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("End date (YYYY-MM-DD)"),
+      startDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("Start date (YYYY-MM-DD)"),
+      endDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe("End date (YYYY-MM-DD)"),
     },
     async (params) => {
       const creds = getQBOCredentials();
       if (!creds?.clientId || !creds?.clientSecret) {
-        return { content: [{ type: "text" as const, text: "Error: QBO credentials not configured" }] };
+        return {
+          content: [{ type: "text" as const, text: "Error: QBO credentials not configured" }],
+        };
       }
       try {
-        const data = await qboProfitAndLoss({ clientId: creds.clientId, clientSecret: creds.clientSecret }, params.startDate, params.endDate);
-        return { content: [{ type: "text" as const, text: sanitize(JSON.stringify(data, null, 2)) }] };
+        const data = await qboProfitAndLoss(
+          { clientId: creds.clientId, clientSecret: creds.clientSecret },
+          params.startDate,
+          params.endDate,
+        );
+        return {
+          content: [{ type: "text" as const, text: sanitize(JSON.stringify(data, null, 2)) }],
+        };
       } catch (err) {
-        return { content: [{ type: "text" as const, text: sanitize(`Error: ${err instanceof Error ? err.message : "unknown"}`) }] };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: sanitize(`Error: ${err instanceof Error ? err.message : "unknown"}`),
+            },
+          ],
+        };
       }
     },
   );
@@ -1217,10 +1468,9 @@ const httpServer = Bun.serve({
     const url = new URL(req.url);
 
     if (url.pathname === "/health") {
-      return new Response(
-        JSON.stringify({ status: "ok", service: "mcp-accounting" }),
-        { headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ status: "ok", service: "mcp-accounting" }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     // ── OAuth Callback (browser redirect from Intuit) ──
@@ -1259,10 +1509,13 @@ const httpServer = Bun.serve({
 
       try {
         await exchangeCode(code, realmId, creds.clientId, creds.clientSecret, redirectUri);
-        return new Response(callbackHtml("Authorization successful! You can close this tab.", true), {
-          status: 200,
-          headers: { "Content-Type": "text/html" },
-        });
+        return new Response(
+          callbackHtml("Authorization successful! You can close this tab.", true),
+          {
+            status: 200,
+            headers: { "Content-Type": "text/html" },
+          },
+        );
       } catch (err) {
         console.error("OAuth token exchange failed:", err instanceof Error ? err.message : err);
         return new Response(callbackHtml("Token exchange failed. Check server logs.", false), {
