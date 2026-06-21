@@ -5,11 +5,7 @@
  * All other code uses the PdfRenderer interface from types.ts.
  */
 
-import type {
-  PdfRenderer,
-  InvoiceData,
-  PaystubData,
-} from "./types.js";
+import type { PdfRenderer, InvoiceData, PaystubData } from "./types.js";
 
 // pdfmake 0.3.x — no TypeScript declarations, use require + any
 // @ts-expect-error — pdfmake has no .d.ts
@@ -51,8 +47,7 @@ const GRAY_TEXT = "#6B7280";
 // ── Invoice Renderer ──────────────────────────────────
 
 function buildInvoiceDoc(data: InvoiceData): DocDefinition {
-  const lineTotal = (item: { quantity: number; rate: number }) =>
-    item.quantity * item.rate;
+  const lineTotal = (item: { quantity: number; rate: number }) => item.quantity * item.rate;
   const total = data.lineItems.reduce((sum, item) => sum + lineTotal(item), 0);
 
   // Line items table
@@ -76,7 +71,11 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
 
   // Logo (PNG buffer → base64 data URI, or text fallback)
   const logoContent: Content = data.logo
-    ? { image: `data:image/png;base64,${data.logo.toString("base64")}`, width: 150, alignment: "right" }
+    ? {
+        image: `data:image/png;base64,${data.logo.toString("base64")}`,
+        width: 150,
+        alignment: "right",
+      }
     : { text: data.from.name, style: "logo", alignment: "right" };
 
   const content: Content[] = [
@@ -89,7 +88,9 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
             { text: "INVOICE", style: "invoiceTitle" },
             { text: data.from.name, bold: true, fontSize: 10, margin: [0, 4, 0, 0] },
             ...data.from.address.map((line: string) => ({
-              text: line, fontSize: 9, color: GRAY_TEXT,
+              text: line,
+              fontSize: 9,
+              color: GRAY_TEXT,
             })),
           ],
         },
@@ -136,7 +137,12 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
     {
       stack: [
         { text: "Invoice details", bold: true, fontSize: 11, color: DARK_TEXT },
-        { text: `Invoice no.: ${data.invoiceNumber}`, fontSize: 9, color: DARK_TEXT, margin: [0, 4, 0, 0] },
+        {
+          text: `Invoice no.: ${data.invoiceNumber}`,
+          fontSize: 9,
+          color: DARK_TEXT,
+          margin: [0, 4, 0, 0],
+        },
         { text: `Terms: ${data.terms}`, fontSize: 9, color: DARK_TEXT },
         { text: `Invoice date: ${data.invoiceDate}`, fontSize: 9, color: DARK_TEXT },
         { text: `Due date: ${data.dueDate}`, fontSize: 9, color: DARK_TEXT },
@@ -171,7 +177,13 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
           table: {
             body: [
               [
-                { text: "Total", bold: true, fontSize: 11, alignment: "right", margin: [0, 0, 20, 0] },
+                {
+                  text: "Total",
+                  bold: true,
+                  fontSize: 11,
+                  alignment: "right",
+                  margin: [0, 0, 20, 0],
+                },
                 { text: usd(total), bold: true, fontSize: 16, alignment: "right" },
               ],
             ],
@@ -278,14 +290,15 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
             { text: "Total Deductions", fontSize: 9, bold: true },
             {
               text: `-${usd(data.deductions.reduce((s, d) => s + d.amount, 0))}`,
-              fontSize: 9, alignment: "right", bold: true,
+              fontSize: 9,
+              alignment: "right",
+              bold: true,
             },
           ],
         ],
       },
       layout: {
-        hLineWidth: (i: number, node: any) =>
-          i === 0 || i === node.table.body.length ? 1 : 0,
+        hLineWidth: (i: number, node: any) => (i === 0 || i === node.table.body.length ? 1 : 0),
         vLineWidth: () => 0,
         hLineColor: () => GRAY_LINE,
         paddingTop: () => 4,
@@ -310,7 +323,9 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
                   { text: "Total Adjustments", fontSize: 9, bold: true },
                   {
                     text: `-${usd(data.adjustments.reduce((s, a) => s + a.amount, 0))}`,
-                    fontSize: 9, alignment: "right", bold: true,
+                    fontSize: 9,
+                    alignment: "right",
+                    bold: true,
                   },
                 ],
               ],
@@ -334,8 +349,23 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         widths: ["*", "auto"],
         body: [
           [
-            { text: "NET PAY", fontSize: 14, bold: true, color: "#FFFFFF", fillColor: ACCENT_BLUE, margin: [8, 8, 8, 8] },
-            { text: usd(data.netPay), fontSize: 14, bold: true, alignment: "right", color: "#FFFFFF", fillColor: ACCENT_BLUE, margin: [8, 8, 8, 8] },
+            {
+              text: "NET PAY",
+              fontSize: 14,
+              bold: true,
+              color: "#FFFFFF",
+              fillColor: ACCENT_BLUE,
+              margin: [8, 8, 8, 8],
+            },
+            {
+              text: usd(data.netPay),
+              fontSize: 14,
+              bold: true,
+              alignment: "right",
+              color: "#FFFFFF",
+              fillColor: ACCENT_BLUE,
+              margin: [8, 8, 8, 8],
+            },
           ],
         ],
       },
@@ -352,8 +382,20 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         widths: ["*", "auto"],
         body: [
           [
-            { text: "Year-to-Date Gross", fontSize: 10, bold: true, fillColor: LIGHT_BG, margin: [4, 4, 4, 4] },
-            { text: usd(data.ytdGross), fontSize: 10, alignment: "right", fillColor: LIGHT_BG, margin: [4, 4, 4, 4] },
+            {
+              text: "Year-to-Date Gross",
+              fontSize: 10,
+              bold: true,
+              fillColor: LIGHT_BG,
+              margin: [4, 4, 4, 4],
+            },
+            {
+              text: usd(data.ytdGross),
+              fontSize: 10,
+              alignment: "right",
+              fillColor: LIGHT_BG,
+              margin: [4, 4, 4, 4],
+            },
           ],
         ],
       },

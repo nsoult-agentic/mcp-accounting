@@ -30,9 +30,7 @@ async function qboFetch(
 ): Promise<unknown> {
   const auth = await getValidAccessToken(config.clientId, config.clientSecret);
   if (!auth) {
-    throw new Error(
-      "QBO not connected — run accounting-qbo-auth-url to authorize",
-    );
+    throw new Error("QBO not connected — run accounting-qbo-auth-url to authorize");
   }
 
   const separator = path.includes("?") ? "&" : "?";
@@ -66,10 +64,7 @@ async function qboFetch(
  * Run a QBO SQL-like query.
  * Example: query(config, "SELECT * FROM Invoice WHERE TxnDate > '2026-01-01'")
  */
-export async function query(
-  config: QBOClientConfig,
-  sql: string,
-): Promise<unknown> {
+export async function query(config: QBOClientConfig, sql: string): Promise<unknown> {
   const encoded = encodeURIComponent(sql);
   return qboFetch(config, `/query?query=${encoded}`);
 }
@@ -78,11 +73,7 @@ export async function query(
  * Read a single entity by type and ID.
  * Example: read(config, "CompanyInfo", "1234567890")
  */
-export async function read(
-  config: QBOClientConfig,
-  entity: string,
-  id: string,
-): Promise<unknown> {
+export async function read(config: QBOClientConfig, entity: string, id: string): Promise<unknown> {
   return qboFetch(config, `/${entity.toLowerCase()}/${id}`);
 }
 
@@ -93,9 +84,7 @@ export async function companyInfo(config: QBOClientConfig): Promise<unknown> {
   // realmId needed for the path — qboFetch also validates token freshness
   const auth = await getValidAccessToken(config.clientId, config.clientSecret);
   if (!auth) {
-    throw new Error(
-      "QBO not connected — run accounting-qbo-auth-url to authorize",
-    );
+    throw new Error("QBO not connected — run accounting-qbo-auth-url to authorize");
   }
   // Pass realmId in path; qboFetch will re-validate token (harmless, avoids refactor)
   return qboFetch(config, `/companyinfo/${auth.realmId}`);
@@ -109,10 +98,7 @@ export async function profitAndLoss(
   startDate: string,
   endDate: string,
 ): Promise<unknown> {
-  return qboFetch(
-    config,
-    `/reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}`,
-  );
+  return qboFetch(config, `/reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}`);
 }
 
 /**

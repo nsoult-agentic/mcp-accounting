@@ -60,7 +60,9 @@ export function isDbAvailable(): boolean {
 export async function initSchema(): Promise<void> {
   const p = getPool();
   if (!p) {
-    console.warn("No db-password in secrets — database features disabled, using Second Brain fallback");
+    console.warn(
+      "No db-password in secrets — database features disabled, using Second Brain fallback",
+    );
     return;
   }
 
@@ -125,11 +127,18 @@ export async function initSchema(): Promise<void> {
     )`);
 
     await p.query(`CREATE INDEX IF NOT EXISTS idx_time_off_date ON accounting.time_off(date)`);
-    await p.query(`CREATE INDEX IF NOT EXISTS idx_deposits_form_period ON accounting.deposits(form, tax_period)`);
+    await p.query(
+      `CREATE INDEX IF NOT EXISTS idx_deposits_form_period ON accounting.deposits(form, tax_period)`,
+    );
 
-    console.log("PostgreSQL schema initialized (accounting.time_off, accounting.compliance_filings, accounting.payroll_runs, accounting.deposits)");
+    console.log(
+      "PostgreSQL schema initialized (accounting.time_off, accounting.compliance_filings, accounting.payroll_runs, accounting.deposits)",
+    );
   } catch (err) {
-    console.error("Failed to initialize database schema:", err instanceof Error ? err.message : err);
+    console.error(
+      "Failed to initialize database schema:",
+      err instanceof Error ? err.message : err,
+    );
     throw err;
   }
 }
@@ -155,9 +164,7 @@ export async function dbTimeOffList(
   if (!p) throw new Error("Database not configured");
   const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
   const endDate =
-    month === 12
-      ? `${year + 1}-01-01`
-      : `${year}-${String(month + 1).padStart(2, "0")}-01`;
+    month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, "0")}-01`;
   const result = await p.query(
     `SELECT date::text, type, COALESCE(note, '') AS note
      FROM accounting.time_off
@@ -247,9 +254,17 @@ export async function dbPayrollInsert(data: {
          employer_futa = $11, pay_stub_path = COALESCE($12, accounting.payroll_runs.pay_stub_path),
          updated_at = now()`,
       [
-        data.month, data.year, data.grossPay, data.federalWithholding,
-        data.socialSecurity, data.medicare, data.totalDeductions, data.netPay,
-        data.employerSs, data.employerMedicare, data.employerFuta,
+        data.month,
+        data.year,
+        data.grossPay,
+        data.federalWithholding,
+        data.socialSecurity,
+        data.medicare,
+        data.totalDeductions,
+        data.netPay,
+        data.employerSs,
+        data.employerMedicare,
+        data.employerFuta,
         data.payStubPath || null,
       ],
     );
@@ -284,9 +299,16 @@ export async function dbDepositInsert(data: {
        payroll_run_id = $8, note = $9, created_by = $10
      RETURNING (xmax = 0) AS is_insert`,
     [
-      data.form, data.taxPeriod, data.amount, data.depositDate,
-      data.eftNumber || null, data.method || "EFTPS", data.status || "confirmed",
-      data.payrollRunId || null, data.note || "", data.createdBy || "neil",
+      data.form,
+      data.taxPeriod,
+      data.amount,
+      data.depositDate,
+      data.eftNumber || null,
+      data.method || "EFTPS",
+      data.status || "confirmed",
+      data.payrollRunId || null,
+      data.note || "",
+      data.createdBy || "neil",
     ],
   );
   return { action: result.rows[0]?.is_insert ? "inserted" : "updated" };
@@ -295,7 +317,9 @@ export async function dbDepositInsert(data: {
 export async function dbDepositGetByPeriod(
   form: string,
   taxPeriods: string[],
-): Promise<Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }>> {
+): Promise<
+  Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }>
+> {
   const p = getPool();
   if (!p) return new Map();
   try {
@@ -305,7 +329,10 @@ export async function dbDepositGetByPeriod(
        WHERE form = $1 AND tax_period = ANY($2)`,
       [form, taxPeriods],
     );
-    const map = new Map<string, { amount: number; depositDate: string; eftNumber: string; status: string }>();
+    const map = new Map<
+      string,
+      { amount: number; depositDate: string; eftNumber: string; status: string }
+    >();
     for (const row of result.rows) {
       map.set(row.tax_period, {
         amount: row.amount,
