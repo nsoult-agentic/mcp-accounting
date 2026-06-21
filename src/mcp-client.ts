@@ -20,8 +20,48 @@ const MCP_TIMEOUT_MS = 15_000;
 let rpcId = 0;
 
 interface McpToolResult {
-  content: { type: string; text?: string; data?: string; mimeType?: string }[];
+  content: {
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    resource?: { blob?: string; text?: string };
+  }[];
   isError?: boolean;
+}
+
+// Parse an SSE response body, returning the last `result` event (notifications
+// skipped). Re-throws a JSON-RPC error if the server reported one.
+function parseSseResult(text: string, toolName: string): McpToolResult | null {
+  let lastResult: McpToolResult | null = null;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
+    try {
+      const json = JSON.parse(line.slice(6));
+      if (json.error) {
+        throw new Error(`${toolName} error: ${json.error.message}`);
+      }
+      if (json.result) {
+        lastResult = json.result as McpToolResult;
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith(`${toolName} error:`)) throw e;
+      // skip unparseable SSE lines
+    }
+  }
+  return lastResult;
+}
+
+// Fallback parse for non-SSE servers that return a plain JSON-RPC body.
+// Non-JSON bodies yield null (caller throws a "no valid response" error).
+function parseJsonResult(text: string): McpToolResult | null {
+  try {
+    const json = JSON.parse(text);
+    if (json.result) return json.result as McpToolResult;
+  } catch {
+    // not JSON
+  }
+  return null;
 }
 
 async function callMcp(
@@ -51,33 +91,11 @@ async function callMcp(
 
   const text = await res.text();
 
-  // Parse SSE response — find the result event (skip notifications)
-  let lastResult: McpToolResult | null = null;
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("data: ")) continue;
-    try {
-      const json = JSON.parse(line.slice(6));
-      if (json.error) {
-        throw new Error(`${toolName} error: ${json.error.message}`);
-      }
-      if (json.result) {
-        lastResult = json.result as McpToolResult;
-      }
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith(`${toolName} error:`)) throw e;
-      // skip unparseable SSE lines
-    }
-  }
-  if (lastResult) return lastResult;
+  const sseResult = parseSseResult(text, toolName);
+  if (sseResult) return sseResult;
 
-  // Fallback: try parsing entire response as JSON (non-SSE servers)
-  try {
-    const json = JSON.parse(text);
-    if (json.result) return json.result as McpToolResult;
-    if (json.error) throw new Error(`${toolName} error: ${json.error.message}`);
-  } catch {
-    // not JSON
-  }
+  const jsonResult = parseJsonResult(text);
+  if (jsonResult) return jsonResult;
 
   throw new Error(`No valid response from ${toolName}`);
 }

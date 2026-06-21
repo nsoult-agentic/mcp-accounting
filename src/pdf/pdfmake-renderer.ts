@@ -18,9 +18,17 @@ pdfMake.fonts = RobotoFonts;
 
 // ── Types (internal to this file) ─────────────────────
 
+// pdfmake 0.3.x ships no type declarations, so its doc-definition shapes are
+// genuinely untyped here. These aliases are scoped to this single adapter file.
+// biome-ignore lint/suspicious/noExplicitAny: pdfmake has no .d.ts; doc-definition content is untyped.
 type Content = any;
+// biome-ignore lint/suspicious/noExplicitAny: pdfmake has no .d.ts; table cells are untyped.
 type TableCell = any;
+// biome-ignore lint/suspicious/noExplicitAny: pdfmake has no .d.ts; doc definition is untyped.
 type DocDefinition = any;
+
+// Minimal shape of the node passed to pdfmake table-layout callbacks.
+type LayoutNode = { table: { body: unknown[] } };
 
 // ── Helpers ───────────────────────────────────────────
 
@@ -158,7 +166,7 @@ function buildInvoiceDoc(data: InvoiceData): DocDefinition {
         body: [tableHeader, ...tableRows],
       },
       layout: {
-        hLineWidth: (i: number, node: any) =>
+        hLineWidth: (i: number, node: LayoutNode) =>
           i === 0 || i === 1 || i === node.table.body.length ? 1 : 0,
         vLineWidth: () => 0,
         hLineColor: () => GRAY_LINE,
@@ -298,7 +306,8 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
         ],
       },
       layout: {
-        hLineWidth: (i: number, node: any) => (i === 0 || i === node.table.body.length ? 1 : 0),
+        hLineWidth: (i: number, node: LayoutNode) =>
+          i === 0 || i === node.table.body.length ? 1 : 0,
         vLineWidth: () => 0,
         hLineColor: () => GRAY_LINE,
         paddingTop: () => 4,
@@ -331,7 +340,7 @@ function buildPaystubDoc(data: PaystubData): DocDefinition {
               ],
             },
             layout: {
-              hLineWidth: (i: number, node: any) =>
+              hLineWidth: (i: number, node: LayoutNode) =>
                 i === 0 || i === node.table.body.length ? 1 : 0,
               vLineWidth: () => 0,
               hLineColor: () => GRAY_LINE,

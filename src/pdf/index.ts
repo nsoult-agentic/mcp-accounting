@@ -14,11 +14,4 @@ export function createRenderer(): PdfRenderer {
   return new PdfMakeRenderer();
 }
 
-export type {
-  PdfRenderer,
-  InvoiceData,
-  InvoiceLineItem,
-  CompanyInfo,
-  PaystubData,
-  PaystubDeduction,
-} from "./types.js";
+export type { PdfRenderer } from "./types.js";
