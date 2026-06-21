@@ -159,7 +159,7 @@ export async function exchangeCode(
   console.log("QBO OAuth: tokens obtained and saved successfully");
 }
 
-export async function refreshTokens(clientId: string, clientSecret: string): Promise<StoredTokens> {
+async function refreshTokens(clientId: string, clientSecret: string): Promise<StoredTokens> {
   const current = readTokens();
   if (!current) {
     throw new Error("No stored tokens to refresh");

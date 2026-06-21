@@ -126,9 +126,12 @@ describe("TAX_CONFIG sanity", () => {
   test("federal brackets are contiguous and ascending", () => {
     const b = TAX_CONFIG.federalBrackets;
     for (let i = 1; i < b.length; i++) {
-      expect(b[i]!.min).toBe(b[i - 1]!.max);
+      const prev = b[i - 1];
+      const cur = b[i];
+      if (prev === undefined || cur === undefined) throw new Error(`bracket ${i} missing`);
+      expect(cur.min).toBe(prev.max);
     }
-    expect(b[0]!.min).toBe(0);
-    expect(b[b.length - 1]!.max).toBe(Infinity);
+    expect(b[0]?.min).toBe(0);
+    expect(b.at(-1)?.max).toBe(Infinity);
   });
 });

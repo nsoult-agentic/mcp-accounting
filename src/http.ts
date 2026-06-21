@@ -109,10 +109,12 @@ const LOGO_PATH = "/Shared/Corporate/logo-black.png";
 interface QBOCredentials {
   clientId: string;
   clientSecret: string;
-  redirectUri?: string;
-  realmId?: string;
-  accessToken?: string;
-  refreshToken?: string;
+  // Optional env-derived fields: absent in quickbooks.env => loaded as undefined,
+  // so the accurate type is `?: string | undefined` (exactOptionalPropertyTypes).
+  redirectUri?: string | undefined;
+  realmId?: string | undefined;
+  accessToken?: string | undefined;
+  refreshToken?: string | undefined;
 }
 
 function loadCredentials(): QBOCredentials | null {
@@ -330,129 +332,168 @@ const COMPLIANCE_CALENDAR = [
   },
 ];
 
+interface DeadlineEntry {
+  name: string;
+  deadline: string;
+  daysUntil: number;
+  description: string;
+}
+
+type DepositInfo = { amount: number; depositDate: string; eftNumber: string; status: string };
+
+// Load 941 deposits (keyed by "941 Deposit (Mon)") for the year and the next.
+async function loadDepositedItems(year: number): Promise<Map<string, DepositInfo>> {
+  const depositedItems = new Map<string, DepositInfo>();
+  const depositPeriods = MONTH_NAMES.flatMap((m) => [`${m} ${year}`, `${m} ${year + 1}`]);
+  const deposits = await dbDepositGetByPeriod("941", depositPeriods);
+  for (const [period, info] of deposits) {
+    const monthName = period.split(" ")[0];
+    depositedItems.set(`941 Deposit (${monthName})`, info);
+  }
+  return depositedItems;
+}
+
+// Fallback when the DB is unavailable: infer filed items from Second Brain.
+async function loadFiledItemsFromBrain(): Promise<Set<string>> {
+  const filedItems = new Set<string>();
+  try {
+    const results = await brainSearch("filed tax form modelo", {
+      category: "decision",
+      status: "done",
+      limit: 30,
+    });
+    const resultLower = results.toLowerCase();
+    for (const item of COMPLIANCE_CALENDAR) {
+      const coreMatch = item.name.match(
+        /(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i,
+      );
+      const coreId = coreMatch
+        ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase()
+        : item.name.toLowerCase();
+      if (resultLower.includes(coreId) && resultLower.includes("filed")) {
+        filedItems.add(item.name);
+      }
+    }
+  } catch {
+    // Unavailable — proceed without filtering
+  }
+  return filedItems;
+}
+
+type DeadlineBucket = "upcoming" | "overdue" | "completed";
+
+function formatDepositDescription(info: DepositInfo): string {
+  const eft = info.eftNumber ? ` (EFT ${info.eftNumber})` : "";
+  const pending = info.status === "pending" ? " ⚠️ PENDING" : "";
+  return `Deposited $${info.amount.toFixed(2)} on ${info.depositDate}${eft}${pending}`;
+}
+
+// Classify one calendar deadline for a given year, or null if outside the
+// -30…+90 day window (or its deadline can't be parsed).
+function classifyDeadline(
+  item: { name: string; deadline: string; description: string },
+  y: number,
+  now: Date,
+  filedItems: Set<string>,
+  depositedItems: Map<string, DepositInfo>,
+): { bucket: DeadlineBucket; entry: DeadlineEntry } | null {
+  const [mm, dd] = item.deadline.split("-").map(Number);
+  if (mm === undefined || dd === undefined) return null;
+  const deadlineDate = new Date(y, mm - 1, dd);
+  const daysUntil = Math.ceil((deadlineDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysUntil < -30 || daysUntil > 90) return null;
+
+  const entry: DeadlineEntry = {
+    name: item.name,
+    deadline: `${y}-${item.deadline}`,
+    daysUntil,
+    description: item.description,
+  };
+  const depositInfo = depositedItems.get(item.name);
+  if (filedItems.has(item.name) || depositInfo) {
+    if (depositInfo) entry.description = formatDepositDescription(depositInfo);
+    return { bucket: "completed", entry };
+  }
+  return { bucket: daysUntil < 0 ? "overdue" : "upcoming", entry };
+}
+
+// Bucket calendar deadlines (this year + next) into overdue/upcoming/completed,
+// within a -30…+90 day window relative to `now`.
+function categorizeDeadlines(
+  now: Date,
+  year: number,
+  filedItems: Set<string>,
+  depositedItems: Map<string, DepositInfo>,
+): Record<DeadlineBucket, DeadlineEntry[]> {
+  const buckets: Record<DeadlineBucket, DeadlineEntry[]> = {
+    upcoming: [],
+    overdue: [],
+    completed: [],
+  };
+  for (const item of COMPLIANCE_CALENDAR) {
+    for (const y of [year, year + 1]) {
+      const result = classifyDeadline(item, y, now, filedItems, depositedItems);
+      if (result) buckets[result.bucket].push(result.entry);
+    }
+  }
+  return buckets;
+}
+
+// Append a sorted deadline section to `lines` (no-op when empty).
+function renderDeadlineSection(
+  lines: string[],
+  heading: string,
+  items: DeadlineEntry[],
+  format: (item: DeadlineEntry) => string,
+): void {
+  if (items.length === 0) return;
+  lines.push(heading);
+  for (const item of [...items].sort((a, b) => a.daysUntil - b.daysUntil)) {
+    lines.push(format(item));
+  }
+  lines.push("");
+}
+
 async function complianceCheck(): Promise<string> {
   const now = new Date();
   const year = now.getFullYear();
   const lines: string[] = ["## Compliance Deadlines", ""];
 
-  // Get filed items — DB primary, brain-search fallback
-  // Also get deposited items from the deposits table
+  // Get filed + deposited items — DB primary, brain-search fallback.
   let filedItems: Set<string>;
-  const depositedItems: Map<
-    string,
-    { amount: number; depositDate: string; eftNumber: string; status: string }
-  > = new Map();
+  let depositedItems: Map<string, DepositInfo>;
   if (isDbAvailable()) {
     filedItems = await dbComplianceGetFiled([year, year + 1]);
-
-    // Check deposits table for 941 deposit deadlines
-    const monthNames = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-    ];
-    const depositPeriods = monthNames.flatMap((m) => [`${m} ${year}`, `${m} ${year + 1}`]);
-    const deposits = await dbDepositGetByPeriod("941", depositPeriods);
-    for (const [period, info] of deposits) {
-      const monthName = period.split(" ")[0];
-      depositedItems.set(`941 Deposit (${monthName})`, info);
-    }
+    depositedItems = await loadDepositedItems(year);
   } else {
-    filedItems = new Set<string>();
-    try {
-      const results = await brainSearch("filed tax form modelo", {
-        category: "decision",
-        status: "done",
-        limit: 30,
-      });
-      const resultLower = results.toLowerCase();
-      for (const item of COMPLIANCE_CALENDAR) {
-        const coreMatch = item.name.match(
-          /(?:Form\s+)?(\d{3,4}(?:-\w+)?)|Modelo\s+(\d+)|W-2|W-3|Delaware|FinCEN|IRPF/i,
-        );
-        const coreId = coreMatch
-          ? (coreMatch[1] || coreMatch[2] || coreMatch[0]).toLowerCase()
-          : item.name.toLowerCase();
-        if (resultLower.includes(coreId) && resultLower.includes("filed")) {
-          filedItems.add(item.name);
-        }
-      }
-    } catch {
-      // Unavailable — proceed without filtering
-    }
+    filedItems = await loadFiledItemsFromBrain();
+    depositedItems = new Map();
   }
 
-  const upcoming: { name: string; deadline: string; daysUntil: number; description: string }[] = [];
-  const overdue: typeof upcoming = [];
-  const completed: typeof upcoming = [];
+  const { upcoming, overdue, completed } = categorizeDeadlines(
+    now,
+    year,
+    filedItems,
+    depositedItems,
+  );
 
-  for (const item of COMPLIANCE_CALENDAR) {
-    const [mm, dd] = item.deadline.split("-").map(Number);
-    if (mm === undefined || dd === undefined) continue;
-    for (const y of [year, year + 1]) {
-      const deadlineDate = new Date(y, mm - 1, dd);
-      const diffMs = deadlineDate.getTime() - now.getTime();
-      const daysUntil = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-
-      if (daysUntil >= -30 && daysUntil <= 90) {
-        const entry = {
-          name: item.name,
-          deadline: `${y}-${item.deadline}`,
-          daysUntil,
-          description: item.description,
-        };
-        const depositInfo = depositedItems.get(item.name);
-        if (filedItems.has(item.name) || depositInfo) {
-          if (depositInfo) {
-            entry.description = `Deposited $${depositInfo.amount.toFixed(2)} on ${depositInfo.depositDate}${depositInfo.eftNumber ? ` (EFT ${depositInfo.eftNumber})` : ""}${depositInfo.status === "pending" ? " ⚠️ PENDING" : ""}`;
-          }
-          completed.push(entry);
-        } else if (daysUntil < 0) {
-          overdue.push(entry);
-        } else {
-          upcoming.push(entry);
-        }
-      }
-    }
-  }
-
-  if (overdue.length > 0) {
-    lines.push("### ⚠️ Overdue");
-    for (const item of overdue.sort((a, b) => a.daysUntil - b.daysUntil)) {
-      lines.push(
-        `- **${item.name}** — ${item.deadline} (${Math.abs(item.daysUntil)} days overdue) — ${item.description}`,
-      );
-    }
-    lines.push("");
-  }
-
-  if (upcoming.length > 0) {
-    lines.push("### Upcoming (next 90 days)");
-    for (const item of upcoming.sort((a, b) => a.daysUntil - b.daysUntil)) {
-      const urgency = item.daysUntil <= 14 ? "🔴" : item.daysUntil <= 30 ? "🟡" : "🟢";
-      lines.push(
-        `- ${urgency} **${item.name}** — ${item.deadline} (${item.daysUntil} days) — ${item.description}`,
-      );
-    }
-    lines.push("");
-  }
-
-  if (completed.length > 0) {
-    lines.push("### ✅ Filed");
-    for (const item of completed.sort((a, b) => a.daysUntil - b.daysUntil)) {
-      lines.push(`- ~~${item.name}~~ — ${item.deadline} — ${item.description}`);
-    }
-    lines.push("");
-  }
+  renderDeadlineSection(
+    lines,
+    "### ⚠️ Overdue",
+    overdue,
+    (item) =>
+      `- **${item.name}** — ${item.deadline} (${Math.abs(item.daysUntil)} days overdue) — ${item.description}`,
+  );
+  renderDeadlineSection(lines, "### Upcoming (next 90 days)", upcoming, (item) => {
+    const urgency = item.daysUntil <= 14 ? "🔴" : item.daysUntil <= 30 ? "🟡" : "🟢";
+    return `- ${urgency} **${item.name}** — ${item.deadline} (${item.daysUntil} days) — ${item.description}`;
+  });
+  renderDeadlineSection(
+    lines,
+    "### ✅ Filed",
+    completed,
+    (item) => `- ~~${item.name}~~ — ${item.deadline} — ${item.description}`,
+  );
 
   if (overdue.length === 0 && upcoming.length === 0 && completed.length === 0) {
     lines.push("No deadlines within the next 90 days.");
@@ -478,16 +519,31 @@ async function complianceFiled(params: {
     return `Error: Unknown deadline "${params.name}". Valid names:\n${COMPLIANCE_NAMES.map((n) => `- ${n}`).join("\n")}`;
   }
 
-  if (isDbAvailable()) {
-    try {
-      const { action } = await dbComplianceFiled(
-        params.name,
-        params.taxYear,
-        params.filedDate,
-        params.method,
-        params.note,
-      );
-      return `## Compliance Filing Recorded
+  try {
+    return isDbAvailable() ? await recordFilingInDb(params) : await recordFilingInBrain(params);
+  } catch (err) {
+    return `Error recording filing: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
+
+type FilingParams = {
+  name: string;
+  taxYear: number;
+  filedDate: string;
+  method: string;
+  note: string;
+};
+
+async function recordFilingInDb(params: FilingParams): Promise<string> {
+  const { action } = await dbComplianceFiled(
+    params.name,
+    params.taxYear,
+    params.filedDate,
+    params.method,
+    params.note,
+  );
+  const status = action === "inserted" ? "New filing recorded" : "Existing filing updated";
+  return `## Compliance Filing Recorded
 
 - **Deadline:** ${params.name}
 - **Tax Year:** ${params.taxYear}
@@ -495,18 +551,14 @@ async function complianceFiled(params: {
 - **Method:** ${params.method || "—"}
 - **Note:** ${params.note || "—"}
 
-Status: ${action === "inserted" ? "New filing recorded" : "Existing filing updated"}.`;
-    } catch (err) {
-      return `Error recording filing: ${err instanceof Error ? err.message : "unknown error"}`;
-    }
-  }
+Status: ${status}.`;
+}
 
-  // Fallback: brain-store
-  try {
-    const title = `Filed ${params.name} for ${params.taxYear}`;
-    const text = `Filed ${params.name} for tax year ${params.taxYear} on ${params.filedDate}. Method: ${params.method || "not specified"}. ${params.note || ""}`;
-    await brainStore(title, text, "decision", "done");
-    return `## Compliance Filing Recorded
+async function recordFilingInBrain(params: FilingParams): Promise<string> {
+  const title = `Filed ${params.name} for ${params.taxYear}`;
+  const text = `Filed ${params.name} for tax year ${params.taxYear} on ${params.filedDate}. Method: ${params.method || "not specified"}. ${params.note || ""}`;
+  await brainStore(title, text, "decision", "done");
+  return `## Compliance Filing Recorded
 
 - **Deadline:** ${params.name}
 - **Tax Year:** ${params.taxYear}
@@ -514,19 +566,59 @@ Status: ${action === "inserted" ? "New filing recorded" : "Existing filing updat
 - **Method:** ${params.method || "—"}
 
 Stored in Second Brain (database not configured).`;
-  } catch (err) {
-    return `Error recording filing: ${err instanceof Error ? err.message : "unknown error"}`;
-  }
 }
 
 // ── Deposit Record ────────────────────────────────────────
+
+const MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+// Resolve the payroll_runs FK for a 941 deposit from its "Mon YYYY" tax period.
+// Returns undefined when the period can't be parsed, no DB is configured, or no
+// matching run exists — the deposit is then recorded without the FK link.
+async function lookup941PayrollRunId(taxPeriod: string): Promise<number | undefined> {
+  const monthMatch = taxPeriod.match(
+    /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})$/i,
+  );
+  const monthAbbr = monthMatch?.[1];
+  const yearStr = monthMatch?.[2];
+  if (monthAbbr === undefined || yearStr === undefined) return undefined;
+
+  const monthNum = MONTH_NAMES.findIndex((m) => m.toLowerCase() === monthAbbr.toLowerCase()) + 1;
+  const yearNum = parseInt(yearStr, 10);
+  try {
+    const p = getPool();
+    if (!p) return undefined;
+    const result = await p.query(
+      `SELECT id FROM accounting.payroll_runs WHERE month = $1 AND year = $2`,
+      [monthNum, yearNum],
+    );
+    return result.rows.length > 0 ? result.rows[0].id : undefined;
+  } catch {
+    // Non-fatal — deposit is recorded without FK link
+    return undefined;
+  }
+}
 
 async function depositRecord(params: {
   form: string;
   taxPeriod: string;
   amount: number;
   depositDate: string;
-  eftNumber?: string;
+  // eftNumber is Zod-optional => may arrive explicitly undefined.
+  eftNumber?: string | undefined;
   method?: string;
   status?: string;
   note?: string;
@@ -536,46 +628,8 @@ async function depositRecord(params: {
   }
 
   // Look up matching payroll_run_id if this is a 941 deposit
-  let payrollRunId: number | undefined;
-  if (params.form === "941") {
-    const monthMatch = params.taxPeriod.match(
-      /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})$/i,
-    );
-    const monthAbbr = monthMatch?.[1];
-    const yearStr = monthMatch?.[2];
-    if (monthAbbr !== undefined && yearStr !== undefined) {
-      const monthNames = [
-        "jan",
-        "feb",
-        "mar",
-        "apr",
-        "may",
-        "jun",
-        "jul",
-        "aug",
-        "sep",
-        "oct",
-        "nov",
-        "dec",
-      ];
-      const monthNum = monthNames.indexOf(monthAbbr.toLowerCase()) + 1;
-      const yearNum = parseInt(yearStr, 10);
-      try {
-        const p = getPool();
-        if (p) {
-          const result = await p.query(
-            `SELECT id FROM accounting.payroll_runs WHERE month = $1 AND year = $2`,
-            [monthNum, yearNum],
-          );
-          if (result.rows.length > 0) {
-            payrollRunId = result.rows[0].id;
-          }
-        }
-      } catch {
-        // Non-fatal — deposit is recorded without FK link
-      }
-    }
-  }
+  const payrollRunId =
+    params.form === "941" ? await lookup941PayrollRunId(params.taxPeriod) : undefined;
 
   try {
     const { action } = await dbDepositInsert({
@@ -643,64 +697,52 @@ async function timeOffLog(params: { date: string; type: string; note: string }):
   }
 }
 
-async function timeOffList(params: {
-  month: number;
-  year: number;
-}): Promise<{ markdown: string; daysOff: DayOff[]; brainUnavailable: boolean }> {
-  let daysOff: DayOff[] = [];
+// Second Brain fallback for time-off lookup: parse TIMEOFF records for the month
+// and dedupe by date. `dataUnavailable` is true if the brain query failed.
+async function fetchTimeOffFromBrain(
+  year: number,
+  monthStr: string,
+): Promise<{ daysOff: DayOff[]; dataUnavailable: boolean }> {
+  const daysOff: DayOff[] = [];
   let dataUnavailable = false;
-
-  if (isDbAvailable()) {
-    // Primary: PostgreSQL
-    try {
-      const rows = await dbTimeOffList(params.year, params.month);
-      daysOff = rows.map((r) => ({ date: r.date, type: r.type, note: r.note || undefined }));
-    } catch {
-      dataUnavailable = true;
-    }
-  } else {
-    // Fallback: Second Brain
-    const monthStr = String(params.month).padStart(2, "0");
-    const query = `${TIMEOFF_PREFIX} ${params.year}-${monthStr}`;
-    try {
-      const results = await brainSearch(query, {
-        mode: "fulltext",
-        category: "task",
-        status: "active",
-        limit: 31,
-      });
-      const lines = results.split("\n");
-      for (const line of lines) {
-        const match = line.match(/TIMEOFF:(\d{4}-\d{2}-\d{2}):(\w+)/);
-        if (match) {
-          const [, date, type] = match;
-          if (
-            date !== undefined &&
-            type !== undefined &&
-            date.startsWith(`${params.year}-${monthStr}`)
-          ) {
-            const noteMatch = line.match(/Note:\s*([^.]+)/);
-            daysOff.push({ date, type, note: noteMatch?.[1]?.trim() });
-          }
-        }
-      }
-    } catch {
-      dataUnavailable = true;
-    }
-
-    // Deduplicate by date (only needed for brain-search path)
-    const seen = new Set<string>();
-    daysOff = daysOff.filter((d) => {
-      if (seen.has(d.date)) return false;
-      seen.add(d.date);
-      return true;
+  try {
+    const results = await brainSearch(`${TIMEOFF_PREFIX} ${year}-${monthStr}`, {
+      mode: "fulltext",
+      category: "task",
+      status: "active",
+      limit: 31,
     });
+    for (const line of results.split("\n")) {
+      const match = line.match(/TIMEOFF:(\d{4}-\d{2}-\d{2}):(\w+)/);
+      const date = match?.[1];
+      const type = match?.[2];
+      if (date === undefined || type === undefined || !date.startsWith(`${year}-${monthStr}`)) {
+        continue;
+      }
+      const note = line.match(/Note:\s*([^.]+)/)?.[1]?.trim();
+      daysOff.push({ date, type, ...(note !== undefined ? { note } : {}) });
+    }
+  } catch {
+    dataUnavailable = true;
   }
 
-  daysOff.sort((a, b) => a.date.localeCompare(b.date));
+  // Deduplicate by date (only needed for the brain-search path).
+  const seen = new Set<string>();
+  const deduped = daysOff.filter((d) => {
+    if (seen.has(d.date)) return false;
+    seen.add(d.date);
+    return true;
+  });
+  return { daysOff: deduped, dataUnavailable };
+}
 
-  const mn = monthName(params.month);
-  let markdown = `## Time Off — ${mn} ${params.year}\n\n`;
+function renderTimeOffMarkdown(
+  daysOff: DayOff[],
+  monthLabel: string,
+  year: number,
+  dataUnavailable: boolean,
+): string {
+  let markdown = `## Time Off — ${monthLabel} ${year}\n\n`;
   if (dataUnavailable) {
     markdown +=
       "⚠️ **Warning: Data store is unavailable.** Time-off data could not be retrieved. Invoice generation will assume zero days off — verify before sending.\n\n";
@@ -716,7 +758,41 @@ async function timeOffList(params: {
     }
     markdown += `\n**Total days off:** ${daysOff.length}`;
   }
+  return markdown;
+}
 
+async function timeOffList(params: {
+  month: number;
+  year: number;
+}): Promise<{ markdown: string; daysOff: DayOff[]; brainUnavailable: boolean }> {
+  const monthStr = String(params.month).padStart(2, "0");
+  let daysOff: DayOff[] = [];
+  let dataUnavailable = false;
+
+  if (isDbAvailable()) {
+    // Primary: PostgreSQL
+    try {
+      const rows = await dbTimeOffList(params.year, params.month);
+      daysOff = rows.map((r) => ({
+        date: r.date,
+        type: r.type,
+        ...(r.note ? { note: r.note } : {}),
+      }));
+    } catch {
+      dataUnavailable = true;
+    }
+  } else {
+    ({ daysOff, dataUnavailable } = await fetchTimeOffFromBrain(params.year, monthStr));
+  }
+
+  daysOff.sort((a, b) => a.date.localeCompare(b.date));
+
+  const markdown = renderTimeOffMarkdown(
+    daysOff,
+    monthName(params.month),
+    params.year,
+    dataUnavailable,
+  );
   return { markdown, daysOff, brainUnavailable: dataUnavailable };
 }
 
@@ -747,8 +823,8 @@ async function fetchLogo(): Promise<Buffer | undefined> {
       if (c.data) {
         return Buffer.from(c.data, "base64");
       }
-      if (c.type === "resource" && (c as any).resource?.blob) {
-        return Buffer.from((c as any).resource.blob, "base64");
+      if (c.type === "resource" && c.resource?.blob) {
+        return Buffer.from(c.resource.blob, "base64");
       }
     }
     // If we got text back, it might be a file path reference — logo not available as inline
@@ -770,44 +846,116 @@ function addDays(dateStr: string, days: number): string {
   return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
 }
 
-async function detectNextInvoiceNumber(year: number): Promise<number> {
-  try {
-    const listing = await nextcloudList(`/Shared/Accounting/Invoices/${year}`);
-    // Parse invoice numbers from filenames: "Invoice NNNN - ..."
-    const numbers: number[] = [];
-    const regex = /Invoice\s+(\d+)/g;
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(listing)) !== null) {
-      if (m[1] !== undefined) numbers.push(parseInt(m[1], 10));
-    }
-    if (numbers.length > 0) {
-      return Math.max(...numbers) + 1;
-    }
-  } catch {
-    // NextCloud unavailable or directory doesn't exist
+// Parse invoice numbers from filenames ("Invoice NNNN - ...") and return the next
+// number (max + 1), or undefined if none are present in the listing.
+function nextInvoiceNumberFrom(listing: string): number | undefined {
+  const numbers: number[] = [];
+  for (const match of listing.matchAll(/Invoice\s+(\d+)/g)) {
+    if (match[1] !== undefined) numbers.push(parseInt(match[1], 10));
   }
-  // Check previous year too
-  try {
-    const listing = await nextcloudList(`/Shared/Accounting/Invoices/${year - 1}`);
-    const numbers: number[] = [];
-    const regex = /Invoice\s+(\d+)/g;
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(listing)) !== null) {
-      if (m[1] !== undefined) numbers.push(parseInt(m[1], 10));
+  return numbers.length > 0 ? Math.max(...numbers) + 1 : undefined;
+}
+
+async function detectNextInvoiceNumber(year: number): Promise<number> {
+  // Check the target year, then the previous year, before falling back.
+  for (const y of [year, year - 1]) {
+    try {
+      const listing = await nextcloudList(`/Shared/Accounting/Invoices/${y}`);
+      const next = nextInvoiceNumberFrom(listing);
+      if (next !== undefined) return next;
+    } catch {
+      // NextCloud unavailable or directory doesn't exist — try the next source.
     }
-    if (numbers.length > 0) {
-      return Math.max(...numbers) + 1;
-    }
-  } catch {
-    // fallback
   }
   return 1001; // safe default
+}
+
+type WorkCalendar = ReturnType<typeof calculateWorkCalendar>;
+
+// Build the markdown summary lines for a generated invoice (table + week ranges,
+// plus a brain-unavailable warning and a days-off list when applicable).
+function buildInvoiceSummary(args: {
+  client: string;
+  year: number;
+  calendar: WorkCalendar;
+  invoiceNumber: number;
+  monthLabel: string;
+  invoiceDate: string;
+  dueDate: string;
+  daysOff: DayOff[];
+  brainUnavailable: boolean;
+}): string[] {
+  const { calendar, daysOff } = args;
+  const total = calendar.totalHours * HOURLY_RATE;
+  const summary = [
+    `## Invoice Generated`,
+    ``,
+    `| Field | Value |`,
+    `|-------|-------|`,
+    `| Invoice # | ${args.invoiceNumber} |`,
+    `| Client | ${args.client} |`,
+    `| Period | ${args.monthLabel} ${args.year} |`,
+    `| Work Days | ${calendar.workDays} / ${calendar.businessDaysInMonth} business days |`,
+    `| Days Off | ${daysOff.length} |`,
+    `| Hours | ${calendar.totalHours} |`,
+    `| Rate | $${HOURLY_RATE}/hr |`,
+    `| **Total** | **$${total.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
+    `| Invoice Date | ${args.invoiceDate} |`,
+    `| Due Date | ${args.dueDate} |`,
+    ``,
+    `### Week Ranges`,
+    ...calendar.weekRanges.map((r) => `- ${r}`),
+  ];
+
+  if (args.brainUnavailable) {
+    summary.push(
+      ``,
+      `⚠️ **Warning:** Second Brain was unavailable — time-off data could not be verified. This invoice assumes zero days off. **Do not send without verifying.**`,
+    );
+  }
+
+  if (daysOff.length > 0) {
+    summary.push(``, `### Days Off`);
+    for (const d of daysOff) {
+      summary.push(`- ${d.date} (${d.type})${d.note ? ` — ${d.note}` : ""}`);
+    }
+  }
+
+  return summary;
+}
+
+// Upload the rendered invoice PDF (unless dry run), appending the outcome to `summary`.
+async function appendInvoiceUpload(
+  summary: string[],
+  args: {
+    year: number;
+    dryRun: boolean;
+    invoiceNumber: number;
+    invoiceDate: string;
+    pdfBuffer: Buffer;
+  },
+): Promise<void> {
+  const sizeKb = (args.pdfBuffer.length / 1024).toFixed(1);
+  if (args.dryRun) {
+    summary.push(``, `*Dry run — PDF generated (${sizeKb} KB) but not uploaded.*`);
+    return;
+  }
+  const [mm, dd, yyyy] = args.invoiceDate.split("/");
+  const fileName = `Invoice ${args.invoiceNumber} - SOULT IO LTD ${yyyy}-${mm}-${dd}.pdf`;
+  const uploadPath = `/Shared/Accounting/Invoices/${args.year}/${fileName}`;
+  try {
+    await nextcloudUpload(uploadPath, args.pdfBuffer.toString("base64"), "base64");
+    summary.push(``, `**Uploaded to:** ${uploadPath}`);
+  } catch (err) {
+    summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
+    summary.push(`PDF generated (${sizeKb} KB) but could not be uploaded.`);
+  }
 }
 
 async function invoiceGenerate(params: {
   month: number;
   year: number;
-  invoiceNumber?: number;
+  invoiceNumber?: number | undefined;
   client: string;
   dryRun: boolean;
 }): Promise<string> {
@@ -855,7 +1003,8 @@ async function invoiceGenerate(params: {
         rate: HOURLY_RATE,
       },
     ],
-    logo,
+    // Only set logo when fetched; omit otherwise (exactOptionalPropertyTypes).
+    ...(logo !== undefined ? { logo } : {}),
   };
 
   // 8. Render PDF
@@ -863,79 +1012,140 @@ async function invoiceGenerate(params: {
   const pdfBuffer = await renderer.renderInvoice(invoiceData);
 
   // 9. Summary
-  const total = calendar.totalHours * HOURLY_RATE;
-  const summary = [
-    `## Invoice Generated`,
-    ``,
-    `| Field | Value |`,
-    `|-------|-------|`,
-    `| Invoice # | ${invoiceNumber} |`,
-    `| Client | ${params.client} |`,
-    `| Period | ${mn} ${params.year} |`,
-    `| Work Days | ${calendar.workDays} / ${calendar.businessDaysInMonth} business days |`,
-    `| Days Off | ${daysOff.length} |`,
-    `| Hours | ${calendar.totalHours} |`,
-    `| Rate | $${HOURLY_RATE}/hr |`,
-    `| **Total** | **$${total.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
-    `| Invoice Date | ${invoiceDate} |`,
-    `| Due Date | ${dueDate} |`,
-    ``,
-    `### Week Ranges`,
-    ...calendar.weekRanges.map((r) => `- ${r}`),
-  ];
-
-  if (brainUnavailable) {
-    summary.push(
-      ``,
-      `⚠️ **Warning:** Second Brain was unavailable — time-off data could not be verified. This invoice assumes zero days off. **Do not send without verifying.**`,
-    );
-  }
-
-  if (daysOff.length > 0) {
-    summary.push(``, `### Days Off`);
-    for (const d of daysOff) {
-      summary.push(`- ${d.date} (${d.type})${d.note ? ` — ${d.note}` : ""}`);
-    }
-  }
+  const summary = buildInvoiceSummary({
+    client: params.client,
+    year: params.year,
+    calendar,
+    invoiceNumber,
+    monthLabel: mn,
+    invoiceDate,
+    dueDate,
+    daysOff,
+    brainUnavailable,
+  });
 
   // 10. Upload to NextCloud (unless dry run)
-  if (!params.dryRun) {
-    const fileName = `Invoice ${invoiceNumber} - SOULT IO LTD ${invoiceDate.split("/")[2]}-${invoiceDate.split("/")[0]}-${invoiceDate.split("/")[1]}.pdf`;
-    const uploadPath = `/Shared/Accounting/Invoices/${params.year}/${fileName}`;
-    try {
-      await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
-      summary.push(``, `**Uploaded to:** ${uploadPath}`);
-    } catch (err) {
-      summary.push(
-        ``,
-        `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`,
-      );
-      summary.push(
-        `PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but could not be uploaded.`,
-      );
-    }
-  } else {
-    summary.push(
-      ``,
-      `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`,
-    );
-  }
+  await appendInvoiceUpload(summary, {
+    year: params.year,
+    dryRun: params.dryRun,
+    invoiceNumber,
+    invoiceDate,
+    pdfBuffer,
+  });
 
   return summary.join("\n");
 }
 
 // ── Pay Stub Generation ────────────────────────────────────
 
+type PayrollResult = ReturnType<typeof calculatePayroll>;
+
+function buildPaystubData(args: {
+  params: {
+    monthlySalary: number;
+    month: number;
+    year: number;
+    adjustments?: { label: string; amount: number }[] | undefined;
+  };
+  payroll: PayrollResult;
+  monthLabel: string;
+  fedTax: number;
+  ssTax: number;
+  medTax: number;
+  netPay: number;
+  ytdGross: number;
+}): PaystubData {
+  const { params, payroll } = args;
+  return {
+    employee: "Neilson Soult",
+    entity: COMPANY.name,
+    period: `${args.monthLabel} ${params.year}`,
+    payDate: `${String(params.month).padStart(2, "0")}/15/${params.year}`,
+    gross: params.monthlySalary,
+    // Show all deduction lines including $0 (e.g., exempt federal withholding).
+    deductions: [
+      { label: "Federal Income Tax", amount: args.fedTax },
+      { label: "Social Security (6.2%)", amount: args.ssTax },
+      { label: "Medicare (1.45%)", amount: args.medTax },
+    ],
+    ...(params.adjustments && params.adjustments.length > 0
+      ? { adjustments: params.adjustments }
+      : {}),
+    netPay: args.netPay,
+    ytdGross: args.ytdGross,
+    employerCosts: [
+      { label: "Employer Social Security (6.2%)", amount: payroll.employerSocialSecurity },
+      { label: "Employer Medicare (1.45%)", amount: payroll.employerMedicare },
+      { label: "FUTA (0.6%)", amount: payroll.employerFUTA },
+    ],
+  };
+}
+
+function buildPaystubSummary(args: {
+  monthLabel: string;
+  year: number;
+  monthlySalary: number;
+  totalDeductions: number;
+  totalAdjustments: number;
+  netPay: number;
+  ytdGross: number;
+}): string[] {
+  const fmt = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 2 });
+  const summary = [
+    `## Pay Stub Generated — ${args.monthLabel} ${args.year}`,
+    ``,
+    `| Field | Value |`,
+    `|-------|-------|`,
+    `| Employee | Neilson Soult |`,
+    `| Gross Pay | $${fmt(args.monthlySalary)} |`,
+    `| Total Deductions | -$${fmt(args.totalDeductions)} |`,
+  ];
+  if (args.totalAdjustments > 0) {
+    summary.push(`| Adjustments | -$${fmt(args.totalAdjustments)} |`);
+  }
+  summary.push(
+    `| **Net Pay** | **$${fmt(args.netPay)}** |`,
+    `| YTD Gross | $${fmt(args.ytdGross)} |`,
+  );
+  return summary;
+}
+
+// Upload the rendered paystub PDF (unless dry run), appending the outcome to
+// `summary`. Returns the upload path on success, or undefined (so the DB row is
+// stored without a path) on dry run or upload failure.
+async function uploadPaystubPdf(
+  summary: string[],
+  args: { dryRun: boolean; year: number; month: number; pdfBuffer: Buffer },
+): Promise<string | undefined> {
+  if (args.dryRun) {
+    const sizeKb = (args.pdfBuffer.length / 1024).toFixed(1);
+    summary.push(``, `*Dry run — PDF generated (${sizeKb} KB) but not uploaded.*`);
+    return undefined;
+  }
+  const monthPadded = String(args.month).padStart(2, "0");
+  const fileName = `paystub-${args.year}-${monthPadded}.pdf`;
+  const uploadPath = `/Shared/Payroll/${args.year}/${fileName}`;
+  try {
+    await nextcloudUpload(uploadPath, args.pdfBuffer.toString("base64"), "base64");
+    summary.push(``, `**Uploaded to:** ${uploadPath}`);
+    return uploadPath;
+  } catch (err) {
+    summary.push(``, `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`);
+    return undefined;
+  }
+}
+
 async function paystubGenerate(params: {
   month: number;
   year: number;
   monthlySalary: number;
   dryRun: boolean;
-  federalWithholding?: number;
-  socialSecurity?: number;
-  medicare?: number;
-  adjustments?: { label: string; amount: number }[];
-  ytdGross?: number;
+  // Zod-optional override fields: may arrive explicitly undefined.
+  federalWithholding?: number | undefined;
+  socialSecurity?: number | undefined;
+  medicare?: number | undefined;
+  adjustments?: { label: string; amount: number }[] | undefined;
+  ytdGross?: number | undefined;
 }): Promise<string> {
   if (params.year < 2020 || params.year > 2030) {
     return `Error: Year must be between 2020 and 2030.`;
@@ -952,76 +1162,42 @@ async function paystubGenerate(params: {
   const totalDeductions = fedTax + ssTax + medTax;
   const totalAdjustments = (params.adjustments || []).reduce((s, a) => s + a.amount, 0);
   const netPay = params.monthlySalary - totalDeductions - totalAdjustments;
+  const ytdGross = params.ytdGross ?? params.monthlySalary * params.month;
 
   // 2. Build paystub data
-  const paystubData: PaystubData = {
-    employee: "Neilson Soult",
-    entity: COMPANY.name,
-    period: `${mn} ${params.year}`,
-    payDate: `${String(params.month).padStart(2, "0")}/15/${params.year}`,
-    gross: params.monthlySalary,
-    deductions: [
-      { label: "Federal Income Tax", amount: fedTax },
-      { label: "Social Security (6.2%)", amount: ssTax },
-      { label: "Medicare (1.45%)", amount: medTax },
-    ],
-    adjustments:
-      params.adjustments && params.adjustments.length > 0 ? params.adjustments : undefined,
+  const paystubData = buildPaystubData({
+    params,
+    payroll,
+    monthLabel: mn,
+    fedTax,
+    ssTax,
+    medTax,
     netPay,
-    ytdGross: params.ytdGross ?? params.monthlySalary * params.month,
-    employerCosts: [
-      { label: "Employer Social Security (6.2%)", amount: payroll.employerSocialSecurity },
-      { label: "Employer Medicare (1.45%)", amount: payroll.employerMedicare },
-      { label: "FUTA (0.6%)", amount: payroll.employerFUTA },
-    ],
-  };
-
-  // Show all deduction lines including $0 (e.g., exempt federal withholding)
+    ytdGross,
+  });
 
   // 3. Render PDF
   const renderer = createRenderer();
   const pdfBuffer = await renderer.renderPaystub(paystubData);
 
   // 4. Summary
-  const summary = [
-    `## Pay Stub Generated — ${mn} ${params.year}`,
-    ``,
-    `| Field | Value |`,
-    `|-------|-------|`,
-    `| Employee | Neilson Soult |`,
-    `| Gross Pay | $${params.monthlySalary.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-    `| Total Deductions | -$${totalDeductions.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-    ...(totalAdjustments > 0
-      ? [
-          `| Adjustments | -$${totalAdjustments.toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-        ]
-      : []),
-    `| **Net Pay** | **$${netPay.toLocaleString("en-US", { minimumFractionDigits: 2 })}** |`,
-    `| YTD Gross | $${(params.ytdGross ?? params.monthlySalary * params.month).toLocaleString("en-US", { minimumFractionDigits: 2 })} |`,
-  ];
+  const summary = buildPaystubSummary({
+    monthLabel: mn,
+    year: params.year,
+    monthlySalary: params.monthlySalary,
+    totalDeductions,
+    totalAdjustments,
+    netPay,
+    ytdGross,
+  });
 
-  // 5. Upload, then persist to DB (DB write is LAST — after PDF + upload succeed)
-  let uploadPath: string | undefined;
-  if (!params.dryRun) {
-    const monthPadded = String(params.month).padStart(2, "0");
-    const fileName = `paystub-${params.year}-${monthPadded}.pdf`;
-    uploadPath = `/Shared/Payroll/${params.year}/${fileName}`;
-    try {
-      await nextcloudUpload(uploadPath, pdfBuffer.toString("base64"), "base64");
-      summary.push(``, `**Uploaded to:** ${uploadPath}`);
-    } catch (err) {
-      summary.push(
-        ``,
-        `**Upload failed:** ${err instanceof Error ? err.message : "unknown error"}`,
-      );
-      uploadPath = undefined;
-    }
-  } else {
-    summary.push(
-      ``,
-      `*Dry run — PDF generated (${(pdfBuffer.length / 1024).toFixed(1)} KB) but not uploaded.*`,
-    );
-  }
+  // 5. Upload (DB write is LAST — after PDF + upload succeed)
+  const uploadPath = await uploadPaystubPdf(summary, {
+    dryRun: params.dryRun,
+    year: params.year,
+    month: params.month,
+    pdfBuffer,
+  });
 
   // 6. Persist payroll run to database (non-fatal if it fails)
   if (!params.dryRun) {
@@ -1477,6 +1653,79 @@ initSchema().catch((err) => {
 
 // ── HTTP Server (stateless mode) ───────────────────────────
 
+const HTML_HEADERS = { "Content-Type": "text/html" } as const;
+
+// Handle the browser redirect back from Intuit after QBO authorization.
+async function handleOAuthCallback(req: Request, url: URL): Promise<Response> {
+  if (!isAuthWindowOpen()) {
+    return new Response("Not Found", { status: 404 });
+  }
+
+  const code = url.searchParams.get("code");
+  const realmId = url.searchParams.get("realmId");
+  const state = url.searchParams.get("state");
+
+  if (!code || !realmId || !state) {
+    return new Response(callbackHtml("Missing parameters", false), {
+      status: 400,
+      headers: HTML_HEADERS,
+    });
+  }
+
+  if (!validateState(state)) {
+    return new Response(callbackHtml("Invalid or expired state", false), {
+      status: 403,
+      headers: HTML_HEADERS,
+    });
+  }
+
+  const creds = getQBOCredentials();
+  if (!creds?.clientId || !creds?.clientSecret) {
+    return new Response(callbackHtml("Server credentials not configured", false), {
+      status: 500,
+      headers: HTML_HEADERS,
+    });
+  }
+
+  const redirectUri = creds.redirectUri || `https://${req.headers.get("host")}/oauth/callback`;
+
+  try {
+    await exchangeCode(code, realmId, creds.clientId, creds.clientSecret, redirectUri);
+    return new Response(callbackHtml("Authorization successful! You can close this tab.", true), {
+      status: 200,
+      headers: HTML_HEADERS,
+    });
+  } catch (err) {
+    console.error("OAuth token exchange failed:", err instanceof Error ? err.message : err);
+    return new Response(callbackHtml("Token exchange failed. Check server logs.", false), {
+      status: 500,
+      headers: HTML_HEADERS,
+    });
+  }
+}
+
+// Handle an MCP request: loopback + allowlisted client IPs (defense in depth).
+async function handleMcpRequest(req: Request): Promise<Response> {
+  // Direct loopback (no XFF) is always allowed; proxied requests must
+  // originate from an allowlisted client IP.
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) {
+    const clientIp = forwarded.split(",")[0]?.trim() ?? "";
+    if (!ALLOWED_IPS.has(clientIp)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+  }
+
+  if (isRateLimited()) {
+    return new Response("Rate limit exceeded", { status: 429 });
+  }
+  const server = createServer();
+  // Stateless mode: omitting sessionIdGenerator leaves it undefined (no sessions).
+  const transport = new WebStandardStreamableHTTPServerTransport({});
+  await server.connect(transport);
+  return transport.handleRequest(req);
+}
+
 const httpServer = Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
@@ -1488,80 +1737,11 @@ const httpServer = Bun.serve({
         headers: { "Content-Type": "application/json" },
       });
     }
-
-    // ── OAuth Callback (browser redirect from Intuit) ──
     if (url.pathname === "/oauth/callback" && req.method === "GET") {
-      if (!isAuthWindowOpen()) {
-        return new Response("Not Found", { status: 404 });
-      }
-
-      const code = url.searchParams.get("code");
-      const realmId = url.searchParams.get("realmId");
-      const state = url.searchParams.get("state");
-
-      if (!code || !realmId || !state) {
-        return new Response(callbackHtml("Missing parameters", false), {
-          status: 400,
-          headers: { "Content-Type": "text/html" },
-        });
-      }
-
-      if (!validateState(state)) {
-        return new Response(callbackHtml("Invalid or expired state", false), {
-          status: 403,
-          headers: { "Content-Type": "text/html" },
-        });
-      }
-
-      const creds = getQBOCredentials();
-      if (!creds?.clientId || !creds?.clientSecret) {
-        return new Response(callbackHtml("Server credentials not configured", false), {
-          status: 500,
-          headers: { "Content-Type": "text/html" },
-        });
-      }
-
-      const redirectUri = creds.redirectUri || `https://${req.headers.get("host")}/oauth/callback`;
-
-      try {
-        await exchangeCode(code, realmId, creds.clientId, creds.clientSecret, redirectUri);
-        return new Response(
-          callbackHtml("Authorization successful! You can close this tab.", true),
-          {
-            status: 200,
-            headers: { "Content-Type": "text/html" },
-          },
-        );
-      } catch (err) {
-        console.error("OAuth token exchange failed:", err instanceof Error ? err.message : err);
-        return new Response(callbackHtml("Token exchange failed. Check server logs.", false), {
-          status: 500,
-          headers: { "Content-Type": "text/html" },
-        });
-      }
+      return handleOAuthCallback(req, url);
     }
-
-    // ── MCP endpoint — loopback + allowlisted client IPs (defense in depth) ──
     if (url.pathname === "/mcp") {
-      // Direct loopback (no XFF) is always allowed; proxied requests must
-      // originate from an allowlisted client IP.
-      const forwarded = req.headers.get("x-forwarded-for");
-      if (forwarded) {
-        const clientIp = forwarded.split(",")[0]?.trim() ?? "";
-        if (!ALLOWED_IPS.has(clientIp)) {
-          return new Response("Forbidden", { status: 403 });
-        }
-      }
-
-      if (isRateLimited()) {
-        return new Response("Rate limit exceeded", { status: 429 });
-      }
-      const server = createServer();
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-      await server.connect(transport);
-      return transport.handleRequest(req);
+      return handleMcpRequest(req);
     }
 
     return new Response("Not Found", { status: 404 });

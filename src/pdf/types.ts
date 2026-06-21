@@ -8,7 +8,8 @@
 
 // ── Company / Client ──────────────────────────────────
 
-export interface CompanyInfo {
+// Sub-types of InvoiceData/PaystubData below — used only within this module.
+interface CompanyInfo {
   name: string;
   address: string[];
   email: string;
@@ -18,7 +19,7 @@ export interface CompanyInfo {
 
 // ── Invoice ───────────────────────────────────────────
 
-export interface InvoiceLineItem {
+interface InvoiceLineItem {
   service: string;
   description: string; // e.g., "March Hours Worked\n03/02 - 03/06\n..."
   quantity: number;
@@ -39,7 +40,7 @@ export interface InvoiceData {
 
 // ── Pay Stub ──────────────────────────────────────────
 
-export interface PaystubDeduction {
+interface PaystubDeduction {
   label: string;
   amount: number;
 }

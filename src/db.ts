@@ -238,7 +238,7 @@ export async function dbPayrollInsert(data: {
   employerSs: number;
   employerMedicare: number;
   employerFuta: number;
-  payStubPath?: string;
+  payStubPath?: string | undefined;
 }): Promise<void> {
   const p = getPool();
   if (!p) return; // Silently skip if DB not configured
@@ -281,12 +281,14 @@ export async function dbDepositInsert(data: {
   taxPeriod: string;
   amount: number;
   depositDate: string;
-  eftNumber?: string;
-  method?: string;
-  status?: string;
-  payrollRunId?: number;
-  note?: string;
-  createdBy?: string;
+  // Optional insert fields: callers pass `T | undefined`; each is coalesced to a
+  // SQL NULL/default below, so absent and explicit-undefined are equivalent here.
+  eftNumber?: string | undefined;
+  method?: string | undefined;
+  status?: string | undefined;
+  payrollRunId?: number | undefined;
+  note?: string | undefined;
+  createdBy?: string | undefined;
 }): Promise<{ action: "inserted" | "updated" }> {
   const p = getPool();
   if (!p) throw new Error("Database not configured");
