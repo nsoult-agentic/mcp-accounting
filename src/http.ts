@@ -785,7 +785,8 @@ async function timeOffList(params: {
     ({ daysOff, dataUnavailable } = await fetchTimeOffFromBrain(params.year, monthStr));
   }
 
-  daysOff.sort((a, b) => a.date.localeCompare(b.date));
+  // Code-point ordering, not localeCompare: deterministic across hosts (dates are ISO strings).
+  daysOff.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   const markdown = renderTimeOffMarkdown(
     daysOff,
