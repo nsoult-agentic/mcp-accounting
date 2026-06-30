@@ -74,16 +74,6 @@ import {
 const PORT = Number(process.env["PORT"]) || 8906;
 const SECRETS_DIR = process.env["SECRETS_DIR"] || "/secrets";
 
-// Client IPs allowed to reach /mcp through the reverse proxy (comma-separated).
-// Direct loopback connections (no X-Forwarded-For) are always allowed. When
-// unset, all proxied requests are rejected (the previous loopback-only behavior).
-const ALLOWED_IPS = new Set(
-  (process.env["MCP_ALLOWED_IPS"] || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
-);
-
 // Company info — used in invoices and pay stubs
 const COMPANY: {
   name: string;
@@ -1705,18 +1695,10 @@ async function handleOAuthCallback(req: Request, url: URL): Promise<Response> {
   }
 }
 
-// Handle an MCP request: loopback + allowlisted client IPs (defense in depth).
-async function handleMcpRequest(req: Request): Promise<Response> {
-  // Direct loopback (no XFF) is always allowed; proxied requests must
-  // originate from an allowlisted client IP.
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    const clientIp = forwarded.split(",")[0]?.trim() ?? "";
-    if (!ALLOWED_IPS.has(clientIp)) {
-      return new Response("Forbidden", { status: 403 });
-    }
-  }
-
+// Handle an MCP request. Access control lives at the NPM reverse proxy only
+// (the container binds loopback and is reachable solely via that proxy), so the
+// app trusts every request it receives and does not gate by client IP.
+export async function handleMcpRequest(req: Request): Promise<Response> {
   if (isRateLimited()) {
     return new Response("Rate limit exceeded", { status: 429 });
   }
@@ -1727,37 +1709,41 @@ async function handleMcpRequest(req: Request): Promise<Response> {
   return transport.handleRequest(req);
 }
 
-const httpServer = Bun.serve({
-  port: PORT,
-  hostname: "0.0.0.0",
-  async fetch(req: Request): Promise<Response> {
-    const url = new URL(req.url);
+// Only bootstrap the listener when run as the entry point, so the request
+// handlers above can be imported (e.g. by tests) without starting a server.
+if (import.meta.main) {
+  const httpServer = Bun.serve({
+    port: PORT,
+    hostname: "0.0.0.0",
+    async fetch(req: Request): Promise<Response> {
+      const url = new URL(req.url);
 
-    if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "ok", service: "mcp-accounting" }), {
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    if (url.pathname === "/oauth/callback" && req.method === "GET") {
-      return handleOAuthCallback(req, url);
-    }
-    if (url.pathname === "/mcp") {
-      return handleMcpRequest(req);
-    }
+      if (url.pathname === "/health") {
+        return new Response(JSON.stringify({ status: "ok", service: "mcp-accounting" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.pathname === "/oauth/callback" && req.method === "GET") {
+        return handleOAuthCallback(req, url);
+      }
+      if (url.pathname === "/mcp") {
+        return handleMcpRequest(req);
+      }
 
-    return new Response("Not Found", { status: 404 });
-  },
-});
+      return new Response("Not Found", { status: 404 });
+    },
+  });
 
-console.log(`mcp-accounting listening on http://0.0.0.0:${PORT}/mcp`);
-console.log("Tools: 11 (Phase 1 + 2A + 2B) | PDF: pdfmake | QBO: OAuth2 ready");
+  console.log(`mcp-accounting listening on http://0.0.0.0:${PORT}/mcp`);
+  console.log("Tools: 11 (Phase 1 + 2A + 2B) | PDF: pdfmake | QBO: OAuth2 ready");
 
-process.on("SIGTERM", () => {
-  httpServer.stop();
-  process.exit(0);
-});
+  process.on("SIGTERM", () => {
+    httpServer.stop();
+    process.exit(0);
+  });
 
-process.on("SIGINT", () => {
-  httpServer.stop();
-  process.exit(0);
-});
+  process.on("SIGINT", () => {
+    httpServer.stop();
+    process.exit(0);
+  });
+}
