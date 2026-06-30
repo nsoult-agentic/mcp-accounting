@@ -56,7 +56,6 @@ services:
       - NODE_ENV=production
       - SECRETS_DIR=/secrets
       - PORT=8906
-      - MCP_ALLOWED_IPS=172.16.10.50  # Mac Mini (Claude Desktop) reaching /mcp via NPM proxy
       - TOKENS_DIR=/tokens
       - NEXTCLOUD_MCP_URL=http://mcp-nextcloud:8902/mcp
       - SECOND_BRAIN_MCP_URL=http://mcp-second-brain:8904/mcp
